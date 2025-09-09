@@ -124,15 +124,16 @@ public:
         GstRTSPMountPoints *mounts = gst_rtsp_server_get_mount_points(server_);
         GstRTSPMediaFactory *factory = gst_rtsp_media_factory_new();
 
-        const char* pipeline_str = "( appsrc name=bsaps_src is-live=true do-timestamp=true format=GST_FORMAT_TIME block=false ! queue max-size-buffers=4 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! openh264enc bitrate=2000000 complexity=0 ! video/x-h264,profile=high,level=(string)4.1 ! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400 )";
+        const char* pipeline_str = "appsrc name=bsaps_src is-live=true do-timestamp=true format=GST_FORMAT_TIME block=false ! queue max-size-buffers=4 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! openh264enc bitrate=2000000 complexity=0 ! video/x-h264,profile=high,level=(string)4.1 ! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400";
         gst_rtsp_media_factory_set_launch(factory, pipeline_str);
         gst_rtsp_media_factory_set_shared(factory, FALSE);  // 각 연결마다 새로운 미디어 생성
-        gst_rtsp_media_factory_set_latency(factory, 100);
+        gst_rtsp_media_factory_set_latency(factory, 200);        // latency 증가
         gst_rtsp_media_factory_set_buffer_size(factory, 0);
         gst_rtsp_media_factory_set_protocols(factory, static_cast<GstRTSPLowerTrans>(GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_TCP));
-        gst_rtsp_media_factory_set_stop_on_disconnect(factory, TRUE);  // 연결 해제시 중지
-        gst_rtsp_media_factory_set_enable_rtcp(factory, FALSE);  // RTCP 비활성화로 단순화
-        gst_rtsp_media_factory_set_eos_shutdown(factory, TRUE);  // EOS시 정리
+        gst_rtsp_media_factory_set_stop_on_disconnect(factory, TRUE);
+        gst_rtsp_media_factory_set_enable_rtcp(factory, TRUE);   // RTCP 활성화로 타이밍 개선
+        gst_rtsp_media_factory_set_eos_shutdown(factory, TRUE);
+        // suspend mode 설정 제거 (기본값 사용)
         g_signal_connect(factory, "media-configure", (GCallback)media_configure_callback, this);
         
         gst_rtsp_mount_points_add_factory(mounts, RTSP_MOUNT_POINT, factory);
@@ -395,11 +396,21 @@ void GStreamerRTSPServer::on_media_configure(GstRTSPMedia *media) {
         return;
     }
     
-    // Set pipeline clock to system clock for better timing
+    // Set pipeline clock and base time for proper timing
     if (GST_IS_PIPELINE(pipeline)) {
         GstClock *clock = gst_system_clock_obtain();
         gst_pipeline_use_clock(GST_PIPELINE(pipeline), clock);
+        gst_element_set_base_time(pipeline, gst_clock_get_time(clock));
         gst_object_unref(clock);
+    } else {
+        // For bin elements, set clock on parent pipeline
+        GstElement *parent = GST_ELEMENT_PARENT(pipeline);
+        if (parent && GST_IS_PIPELINE(parent)) {
+            GstClock *clock = gst_system_clock_obtain();
+            gst_pipeline_use_clock(GST_PIPELINE(parent), clock);
+            gst_element_set_base_time(parent, gst_clock_get_time(clock));
+            gst_object_unref(clock);
+        }
     }
     
     // Configure appsrc properties for YUYV stream
@@ -423,6 +434,8 @@ void GStreamerRTSPServer::on_media_configure(GstRTSPMedia *media) {
         "max-bytes", G_GUINT64_CONSTANT(0),
         "emit-signals", TRUE,
         NULL);
+    
+    // Note: appsrc element name is already set in pipeline string as "bsaps_src"
     gst_caps_unref(caps);
     
     g_signal_connect(appsrc_, "need-data", (GCallback)need_data_callback, this);
