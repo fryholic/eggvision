@@ -51,11 +51,18 @@ private:
     std::queue<T> data_queue;
     std::condition_variable cv;
     std::atomic<bool> stopped{false};
+    const size_t max_size = 30;  // 최대 큐 사이즈 설정
 
 public:
     void push(T new_value) {
         if (stopped) return;
         std::lock_guard<std::mutex> lock(mtx);
+        
+        // 큐가 가득 찬 경우 오래된 프레임 제거 (leaky behavior)
+        while (data_queue.size() >= max_size && !data_queue.empty()) {
+            data_queue.pop();
+        }
+        
         data_queue.push(std::move(new_value));
         cv.notify_one();
     }
@@ -124,7 +131,7 @@ public:
         GstRTSPMountPoints *mounts = gst_rtsp_server_get_mount_points(server_);
         GstRTSPMediaFactory *factory = gst_rtsp_media_factory_new();
 
-        const char* pipeline_str = "appsrc name=bsaps_src is-live=true do-timestamp=true format=GST_FORMAT_TIME block=false ! queue max-size-buffers=4 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! openh264enc bitrate=2000000 complexity=0 ! video/x-h264,profile=high,level=(string)4.1 ! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400";
+        const char* pipeline_str = "appsrc name=bsaps_src is-live=true do-timestamp=true format=GST_FORMAT_TIME block=false ! queue max-size-buffers=20 leaky=downstream ! videoconvert ! video/x-raw,format=NV12 ! v4l2h264enc output-io-mode=mmap capture-io-mode=mmap extra-controls=\"controls,repeat_sequence_header=1,video_bitrate=2000000,h264_profile=4,h264_level=13\" ! video/x-h264,profile=baseline,level=(string)4 ! queue max-size-buffers=10 ! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400";
         gst_rtsp_media_factory_set_launch(factory, pipeline_str);
         gst_rtsp_media_factory_set_shared(factory, FALSE);  // 각 연결마다 새로운 미디어 생성
         gst_rtsp_media_factory_set_latency(factory, 200);        // latency 증가
@@ -229,12 +236,12 @@ public:
         // Use YUYV for HR stream and convert in GStreamer
         config_->at(0).pixelFormat = formats::YUYV;
         config_->at(0).size = Size(CAPTURE_WIDTH_HR, CAPTURE_HEIGHT_HR);
-        config_->at(0).bufferCount = 8;
+        config_->at(0).bufferCount = 12;  // 버퍼 수 증가로 타임아웃 방지
         
         // Configure YUYV stream for local processing (keep 480p as requested)
         config_->at(1).pixelFormat = formats::YUYV;
         config_->at(1).size = Size(CAPTURE_WIDTH_LR, CAPTURE_HEIGHT_LR);
-        config_->at(1).bufferCount = 4;
+        config_->at(1).bufferCount = 6;   // LR 버퍼도 증가
         
         if (config_->validate() == CameraConfiguration::Invalid || camera_->configure(config_.get()) < 0) return false;
 
@@ -272,6 +279,11 @@ public:
         ControlList controls;
         int64_t frame_time = 1000000 / CAPTURE_FPS;
         controls.set(controls::FrameDurationLimits, Span<const int64_t, 2>({frame_time, frame_time}));
+        
+        // 카메라 안정성을 위한 추가 controls
+        controls.set(controls::AeEnable, true);
+        controls.set(controls::AwbEnable, true);
+        
         if (camera_->start(&controls)) return false;
 
         for (auto& req : requests_) camera_->queueRequest(req.get());
