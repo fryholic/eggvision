@@ -51,6 +51,9 @@ if(BSAPS_BUILD_TESTS)
     add_executable(bsaps_tests tests/test_core.cpp)
     target_link_libraries(bsaps_tests PRIVATE bsaps_core)
     add_test(NAME bsaps_core_tests COMMAND bsaps_tests)
+
+    add_executable(bsaps_model_smoke tests/model_smoke.cpp)
+    target_link_libraries(bsaps_model_smoke PRIVATE openvino::runtime Threads::Threads)
 endif()
 
 install(TARGETS bsaps_app RUNTIME DESTINATION bin)

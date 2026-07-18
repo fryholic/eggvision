@@ -7,6 +7,7 @@ log="${2:-soak-$(date +%Y%m%d-%H%M%S).log}"
 resource_log="${log}.resources"
 
 export LD_LIBRARY_PATH="/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+started_epoch="$(date +%s)"
 ./build/bsaps_app --duration "$duration" >"$log" 2>&1 &
 app_pid=$!
 trap 'kill -TERM "$app_pid" 2>/dev/null || true' EXIT
@@ -34,6 +35,11 @@ monitor_pid=$!
 wait "$app_pid"
 wait "$monitor_pid" || true
 trap - EXIT
+elapsed="$(( $(date +%s) - started_epoch ))"
+if (( elapsed + 5 < duration )); then
+  echo "soak test ended early: elapsed=${elapsed}s requested=${duration}s" >&2
+  exit 1
+fi
 
 {
   echo "kernel_errors_begin"

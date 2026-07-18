@@ -126,12 +126,16 @@ bool InferenceWorker::initialize() {
                       << " output=" << output_shape << '\n';
             return false;
         }
-        compiled_model_ = core_.compile_model(model_, "CPU");
+        ov::AnyMap properties{
+            {ov::hint::performance_mode.name(), ov::hint::PerformanceMode::LATENCY},
+            {ov::inference_num_threads.name(), static_cast<int>(config_.inference_threads)},
+        };
+        compiled_model_ = core_.compile_model(model_, "CPU", properties);
         infer_request_ = compiled_model_.create_infer_request();
         initialized_.store(true);
         std::cout << "[inference] OpenVINO model=" << config_.model_path
                   << " input=" << input_shape << " output=" << output_shape
-                  << " device=CPU\n";
+                  << " device=CPU threads=" << config_.inference_threads << '\n';
         return true;
     } catch (const std::exception &error) {
         std::cerr << "[inference] initialization failed: " << error.what() << '\n';

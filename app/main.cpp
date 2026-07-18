@@ -31,6 +31,7 @@ void usage(const char *program) {
         << "  --bitrate BPS         H.264 bitrate (default 4000000)\n"
         << "  --confidence VALUE    person confidence threshold (default 0.30)\n"
         << "  --nms VALUE           NMS IoU threshold (default 0.45)\n"
+        << "  --inference-threads N OpenVINO CPU threads (default 2)\n"
         << "  --duration SECONDS    stop automatically; 0 means run until signal\n"
         << "  --no-inference        stream without running OpenVINO\n"
         << "  --help                show this help\n";
@@ -58,6 +59,8 @@ bsaps::AppConfig parseArguments(int argc, char **argv) {
             config.confidence_threshold = std::stof(value(i));
         } else if (argument == "--nms") {
             config.nms_threshold = std::stof(value(i));
+        } else if (argument == "--inference-threads") {
+            config.inference_threads = static_cast<unsigned>(std::stoul(value(i)));
         } else if (argument == "--duration") {
             config.duration_seconds = static_cast<unsigned>(std::stoul(value(i)));
         } else if (argument == "--no-inference") {
@@ -76,6 +79,9 @@ bsaps::AppConfig parseArguments(int argc, char **argv) {
         config.nms_threshold < 0.0F || config.nms_threshold > 1.0F) {
         throw std::runtime_error("confidence and NMS thresholds must be in [0,1]");
     }
+    if (config.inference_threads == 0) {
+        throw std::runtime_error("--inference-threads must be at least 1");
+    }
     return config;
 }
 
@@ -88,7 +94,8 @@ void printConfiguration(const bsaps::AppConfig &config) {
               << " inference=" << (config.inference_enabled ? "on" : "off")
               << " model=" << config.model_path
               << " confidence=" << config.confidence_threshold
-              << " nms=" << config.nms_threshold << '\n';
+              << " nms=" << config.nms_threshold
+              << " inference_threads=" << config.inference_threads << '\n';
 }
 
 }  // namespace
@@ -178,4 +185,3 @@ int main(int argc, char **argv) {
         return 1;
     }
 }
-

@@ -25,10 +25,10 @@ struct AppConfig {
     float nms_threshold = 0.45F;
     unsigned inference_width = 320;
     unsigned inference_height = 320;
+    unsigned inference_threads = 2;
 
     unsigned duration_seconds = 0;
     unsigned metrics_interval_seconds = 5;
 };
 
 }  // namespace bsaps
-
