@@ -1,41 +1,12 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# debug information files
-*.dwo
+/build/
+/build-*/
+*.log
+*.h264
+*.mp4
+*.tar.gz
+*.core
+camera_test.*
+test.*
+demo/zero_copy_rtsp_demo/zero_copy_rtsp_demo
+.vscode/
+.idea/

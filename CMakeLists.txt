@@ -1,30 +1,56 @@
 cmake_minimum_required(VERSION 3.16)
-project(BsapsEdgeDevice CXX)
+project(bsaps_edge_device VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Find libcamera using pkg-config
+option(BSAPS_BUILD_TESTS "Build unit tests" ON)
+
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBCAMERA REQUIRED libcamera)
+pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
+pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
+    gstreamer-1.0
+    gstreamer-app-1.0
+    gstreamer-allocators-1.0
+    gstreamer-video-1.0
+    gstreamer-rtsp-server-1.0)
 
-# Find GStreamer using pkg-config
-pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-rtsp-server-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0)
+# The Raspberry Pi image installs these config packages outside the default path.
+list(APPEND CMAKE_PREFIX_PATH "/usr/local/runtime/cmake" "/usr/local/lib/cmake/opencv4")
+find_package(OpenVINO REQUIRED COMPONENTS Runtime)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn)
+find_package(Threads REQUIRED)
 
-add_executable(bsaps_app main.cpp)
+add_library(bsaps_core
+    src/camera_capture.cpp
+    src/inference.cpp
+    src/rtsp_server.cpp)
 
-# Include directories for bsaps_app
-target_include_directories(bsaps_app PRIVATE 
-    ${LIBCAMERA_INCLUDE_DIRS}
-    ${GSTREAMER_INCLUDE_DIRS}
-)
+target_include_directories(bsaps_core
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${OpenCV_INCLUDE_DIRS})
 
-# Link libraries for bsaps_app
-target_link_libraries(bsaps_app PRIVATE
-    ${LIBCAMERA_LIBRARIES}
-    ${GSTREAMER_LIBRARIES}
-    pthread
-)
+target_link_libraries(bsaps_core
+    PUBLIC
+        PkgConfig::LIBCAMERA
+        PkgConfig::GSTREAMER
+        openvino::runtime
+        ${OpenCV_LIBS}
+        Threads::Threads)
 
-install(TARGETS bsaps_app DESTINATION bin)
+target_compile_options(bsaps_core PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(bsaps_app app/main.cpp)
+target_link_libraries(bsaps_app PRIVATE bsaps_core)
+
+if(BSAPS_BUILD_TESTS)
+    enable_testing()
+    add_executable(bsaps_tests tests/test_core.cpp)
+    target_link_libraries(bsaps_tests PRIVATE bsaps_core)
+    add_test(NAME bsaps_core_tests COMMAND bsaps_tests)
+endif()
+
+install(TARGETS bsaps_app RUNTIME DESTINATION bin)

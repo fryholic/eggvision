@@ -1,0 +1,19 @@
+[Unit]
+Description=BSAPS dual-stream camera RTSP and inference service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=video
+WorkingDirectory=/home/pi/bsaps-edge-device
+Environment=LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib
+ExecStart=/home/pi/bsaps-edge-device/build/bsaps_app
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+

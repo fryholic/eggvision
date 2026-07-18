@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+required_commands=(rpicam-hello gst-launch-1.0 gst-inspect-1.0 v4l2-ctl cmake pkg-config)
+for command in "${required_commands[@]}"; do
+  command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }
+done
+
+for element in appsrc queue v4l2h264enc h264parse rtph264pay; do
+  gst-inspect-1.0 "$element" >/dev/null || { echo "missing GStreamer element: $element" >&2; exit 1; }
+done
+
+encoder_info="$(gst-inspect-1.0 v4l2h264enc)"
+grep -q 'dmabuf-import' <<<"$encoder_info" || {
+  echo "v4l2h264enc has no dmabuf-import mode" >&2
+  exit 1
+}
+
+test -f /usr/local/runtime/cmake/OpenVINOConfig.cmake || {
+  echo "OpenVINOConfig.cmake not found" >&2
+  exit 1
+}
+test -f /usr/local/lib/cmake/opencv4/OpenCVConfig.cmake || {
+  echo "OpenCVConfig.cmake not found" >&2
+  exit 1
+}
+test -f models/yolov5n.xml && test -f models/yolov5n.bin || {
+  echo "models/yolov5n.xml and .bin are required" >&2
+  exit 1
+}
+
+rpicam-hello --list-cameras
+rpicam-hello --nopreview --timeout 3000
+v4l2-ctl -d /dev/video11 --list-ctrls-menus | grep -E 'h264_level|h264_profile|video_bitrate'
+
+echo "preflight passed"
