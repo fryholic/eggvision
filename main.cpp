@@ -131,15 +131,25 @@ public:
         GstRTSPMountPoints *mounts = gst_rtsp_server_get_mount_points(server_);
         GstRTSPMediaFactory *factory = gst_rtsp_media_factory_new();
 
-        const char* pipeline_str = "appsrc name=bsaps_src is-live=true do-timestamp=true format=GST_FORMAT_TIME block=false ! queue max-size-buffers=20 leaky=downstream ! videoconvert ! video/x-raw,format=NV12 ! v4l2h264enc output-io-mode=mmap capture-io-mode=mmap extra-controls=\"controls,repeat_sequence_header=1,video_bitrate=2000000,h264_profile=4,h264_level=13\" ! video/x-h264,profile=baseline,level=(string)4 ! queue max-size-buffers=10 ! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400";
+        // v4l2h264enc 하드웨어 인코더 사용 - 간단한 설정으로 시작
+        const char* pipeline_str =      
+                                    "appsrc name=bsaps_src is-live=true do-timestamp=true format=GST_FORMAT_TIME block=false "
+                                    "! video/x-raw,format=YUY2,width=1920,height=1080,framerate=30/1 " // 1. 입력 데이터 형식을 명확히 지정
+                                    "! videoconvert ! video/x-raw,format=NV12" // 2. YUY2를 하드웨어 인코더가 선호하는 포맷(NV12 등)으로 변환
+                                    "! queue "
+                                    "! v4l2h264enc " // 3. 1920x1080 해상도 그대로 하드웨어 인코딩
+                                    "! h264parse config-interval=1 "
+                                    "! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400";
         gst_rtsp_media_factory_set_launch(factory, pipeline_str);
-        gst_rtsp_media_factory_set_shared(factory, FALSE);  // 각 연결마다 새로운 미디어 생성
-        gst_rtsp_media_factory_set_latency(factory, 200);        // latency 증가
-        gst_rtsp_media_factory_set_buffer_size(factory, 0);
+        // 하드웨어 인코더의 단일 인스턴스 보장을 위한 설정
+        gst_rtsp_media_factory_set_shared(factory, TRUE);  // 미디어 공유 필수
+        gst_rtsp_media_factory_set_latency(factory, 0);
+        gst_rtsp_media_factory_set_buffer_size(factory, 0x100000);
         gst_rtsp_media_factory_set_protocols(factory, static_cast<GstRTSPLowerTrans>(GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_TCP));
-        gst_rtsp_media_factory_set_stop_on_disconnect(factory, TRUE);
-        gst_rtsp_media_factory_set_enable_rtcp(factory, TRUE);   // RTCP 활성화로 타이밍 개선
-        gst_rtsp_media_factory_set_eos_shutdown(factory, TRUE);
+        gst_rtsp_media_factory_set_stop_on_disconnect(factory, TRUE);   // 연결 끊김시 정지하여 리소스 해제
+        gst_rtsp_media_factory_set_enable_rtcp(factory, TRUE);
+        gst_rtsp_media_factory_set_eos_shutdown(factory, TRUE);          // EOS시 정지하여 리소스 해제  
+        gst_rtsp_media_factory_set_suspend_mode(factory, GST_RTSP_SUSPEND_MODE_RESET); // 재설정 모드로 리소스 관리
         // suspend mode 설정 제거 (기본값 사용)
         g_signal_connect(factory, "media-configure", (GCallback)media_configure_callback, this);
         
@@ -425,7 +435,7 @@ void GStreamerRTSPServer::on_media_configure(GstRTSPMedia *media) {
         }
     }
     
-    // Configure appsrc properties for YUYV stream
+    // VLC 호환성을 위한 appsrc 설정
     GstCaps *caps = gst_caps_new_simple("video/x-raw",
         "format", G_TYPE_STRING, "YUY2",
         "width", G_TYPE_INT, CAPTURE_WIDTH_HR,
@@ -440,11 +450,18 @@ void GStreamerRTSPServer::on_media_configure(GstRTSPMedia *media) {
         "format", GST_FORMAT_TIME,
         "is-live", TRUE,
         "do-timestamp", TRUE,
-        "min-latency", G_GINT64_CONSTANT(33333333),  // ~30ms for 30fps
-        "max-latency", G_GINT64_CONSTANT(100000000), // 100ms
+        "min-latency", G_GINT64_CONSTANT(0),         // 최소 latency
+        "max-latency", G_GINT64_CONSTANT(0),         // 최소 latency  
         "block", FALSE,
         "max-bytes", G_GUINT64_CONSTANT(0),
         "emit-signals", TRUE,
+        "leaky-type", 2,  // GST_APP_LEAKY_TYPE_DOWNSTREAM
+        NULL);
+    
+    // RTSP 미디어에 추가 설정
+    g_object_set(G_OBJECT(media),
+        "latency", 0,
+        "time-provider", TRUE,
         NULL);
     
     // Note: appsrc element name is already set in pipeline string as "bsaps_src"
