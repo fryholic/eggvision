@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 duration="${1:-1800}"
 log="${2:-soak-$(date +%Y%m%d-%H%M%S).log}"
+resource_log="${log}.resources"
 
 export LD_LIBRARY_PATH="/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 ./build/bsaps_app --duration "$duration" >"$log" 2>&1 &
@@ -18,13 +19,20 @@ for _ in {1..30}; do
 done
 grep -q '\[camera\] capture started' "$log" || { echo "application did not start" >&2; exit 1; }
 
-{
-  echo "start_rss_kb=$(awk '/VmRSS/{print $2}' /proc/$app_pid/status)"
-  echo "start_fd_count=$(find /proc/$app_pid/fd -mindepth 1 -maxdepth 1 | wc -l)"
-} >>"$log"
+(
+  while kill -0 "$app_pid" 2>/dev/null; do
+    timestamp="$(date --iso-8601=seconds)"
+    rss_kb="$(awk '/VmRSS/{print $2}' /proc/$app_pid/status)"
+    fd_count="$(find /proc/$app_pid/fd -mindepth 1 -maxdepth 1 | wc -l)"
+    echo "$timestamp rss_kb=$rss_kb fd_count=$fd_count"
+    sleep 30
+  done
+) >"$resource_log" &
+monitor_pid=$!
 
 ./scripts/verify_rtsp.sh rtsp://127.0.0.1:8554/stream 3 10
 wait "$app_pid"
+wait "$monitor_pid" || true
 trap - EXIT
 
 {
@@ -37,5 +45,4 @@ grep -q '\[app\] stopped .*outstanding=0' "$log" || {
   echo "soak test ended without clean lease release" >&2
   exit 1
 }
-echo "soak test passed: $log"
-
+echo "soak test passed: $log (resources: $resource_log)"
