@@ -124,7 +124,9 @@ int main(int argc, char **argv) {
             });
         }
 
-        if (!rtsp.start() || !inference.start() || !camera.start()) {
+        // Do not expose the RTSP listener until the camera is producing frames;
+        // otherwise an eager client can make the first DESCRIBE fail with 503.
+        if (!inference.start() || !camera.start() || !rtsp.start()) {
             camera.stop();
             inference.stop();
             rtsp.stop();
@@ -163,7 +165,8 @@ int main(int argc, char **argv) {
                       << ",\"rtsp_dropped\":" << metrics.rtsp_dropped.load()
                       << ",\"inference_dropped\":" << metrics.inference_dropped.load()
                       << ",\"capture_errors\":" << metrics.capture_errors.load()
-                      << ",\"rtsp_errors\":" << metrics.rtsp_errors.load() << "}\n";
+                      << ",\"rtsp_errors\":" << metrics.rtsp_errors.load()
+                      << ",\"rtsp_recoveries\":" << metrics.rtsp_recoveries.load() << "}\n";
             last_capture = captured;
             last_rtsp = pushed;
             last_inference = inferred;

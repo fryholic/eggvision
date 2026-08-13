@@ -23,6 +23,25 @@ void destroyLease(gpointer data) {
     delete static_cast<std::shared_ptr<FrameLease> *>(data);
 }
 
+const char *mediaStatusName(GstRTSPMediaStatus status) {
+    switch (status) {
+        case GST_RTSP_MEDIA_STATUS_UNPREPARED:
+            return "unprepared";
+        case GST_RTSP_MEDIA_STATUS_UNPREPARING:
+            return "unpreparing";
+        case GST_RTSP_MEDIA_STATUS_PREPARING:
+            return "preparing";
+        case GST_RTSP_MEDIA_STATUS_PREPARED:
+            return "prepared";
+        case GST_RTSP_MEDIA_STATUS_SUSPENDED:
+            return "suspended";
+        case GST_RTSP_MEDIA_STATUS_ERROR:
+            return "error";
+        default:
+            return "unknown";
+    }
+}
+
 }  // namespace
 
 RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
@@ -34,29 +53,22 @@ RtspServer::~RtspServer() {
     stop();
 }
 
-bool RtspServer::start() {
-    if (running_.exchange(true)) {
-        return true;
+bool RtspServer::installFactory() {
+    if (!mounts_) {
+        return false;
     }
 
-    loop_ = g_main_loop_new(nullptr, FALSE);
-    server_ = gst_rtsp_server_new();
-    gst_rtsp_server_set_address(server_, config_.rtsp_address.c_str());
-    gst_rtsp_server_set_service(server_, config_.rtsp_port.c_str());
-
-    GstRTSPMountPoints *mounts = gst_rtsp_server_get_mount_points(server_);
     GstRTSPMediaFactory *factory = gst_rtsp_media_factory_new();
-
     std::ostringstream pipeline;
     pipeline << "( appsrc name=source is-live=true format=time do-timestamp=false block=false "
-             << "max-buffers=2 leaky-type=downstream "
+             << "max-buffers=1 leaky-type=downstream "
              // GStreamer 1.22's v4l2 encoder imports GstDmaBufMemory but its pad
              // template advertises plain video/x-raw. Adding the memory feature
              // causes a not-linked error; the memory object remains DMABUF here.
              << "! video/x-raw,format=I420,width=" << config_.main_width
              << ",height=" << config_.main_height << ",framerate=" << config_.fps
              << "/1,colorimetry=bt709,interlace-mode=progressive,pixel-aspect-ratio=1/1 "
-             << "! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream "
+             << "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
              << "! v4l2h264enc output-io-mode=5 capture-io-mode=2 "
              << "extra-controls=\"controls,h264_level=11,h264_profile=4,video_bitrate="
              << config_.bitrate << ",video_gop_size=" << config_.gop
@@ -68,19 +80,32 @@ bool RtspServer::start() {
 
     gst_rtsp_media_factory_set_launch(factory, pipeline.str().c_str());
     gst_rtsp_media_factory_set_shared(factory, TRUE);
-    gst_rtsp_media_factory_set_stop_on_disconnect(factory, TRUE);
-    gst_rtsp_media_factory_set_eos_shutdown(factory, TRUE);
+    gst_rtsp_media_factory_set_stop_on_disconnect(factory, FALSE);
+    gst_rtsp_media_factory_set_eos_shutdown(factory, FALSE);
+    gst_rtsp_media_factory_set_suspend_mode(factory, GST_RTSP_SUSPEND_MODE_NONE);
     gst_rtsp_media_factory_set_protocols(
         factory, static_cast<GstRTSPLowerTrans>(GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_TCP));
     gst_rtsp_media_factory_set_latency(factory, 50);
     g_signal_connect(factory, "media-configure", G_CALLBACK(RtspServer::mediaConfigure), this);
-    gst_rtsp_mount_points_add_factory(mounts, config_.rtsp_mount.c_str(), factory);
-    g_object_unref(mounts);
+    gst_rtsp_mount_points_add_factory(mounts_, config_.rtsp_mount.c_str(), factory);
+    return true;
+}
 
-    attach_id_ = gst_rtsp_server_attach(server_, nullptr);
-    if (attach_id_ == 0) {
-        std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':' << config_.rtsp_port << '\n';
+bool RtspServer::start() {
+    if (running_.exchange(true)) {
+        return true;
+    }
+
+    loop_ = g_main_loop_new(nullptr, FALSE);
+    server_ = gst_rtsp_server_new();
+    gst_rtsp_server_set_address(server_, config_.rtsp_address.c_str());
+    gst_rtsp_server_set_service(server_, config_.rtsp_port.c_str());
+    mounts_ = gst_rtsp_server_get_mount_points(server_);
+    if (!installFactory()) {
+        std::cerr << "[rtsp] failed to install media factory\n";
         running_.store(false);
+        g_object_unref(mounts_);
+        mounts_ = nullptr;
         g_object_unref(server_);
         server_ = nullptr;
         g_main_loop_unref(loop_);
@@ -88,6 +113,22 @@ bool RtspServer::start() {
         return false;
     }
 
+    attach_id_ = gst_rtsp_server_attach(server_, nullptr);
+    if (attach_id_ == 0) {
+        std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':' << config_.rtsp_port << '\n';
+        running_.store(false);
+        g_object_unref(mounts_);
+        mounts_ = nullptr;
+        g_object_unref(server_);
+        server_ = nullptr;
+        g_main_loop_unref(loop_);
+        loop_ = nullptr;
+        return false;
+    }
+
+    status_since_us_.store(g_get_monotonic_time());
+    last_session_cleanup_us_ = status_since_us_.load();
+    watchdog_id_ = g_timeout_add(500, RtspServer::watchdogTick, this);
     feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
     loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
     std::cout << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
@@ -97,6 +138,15 @@ bool RtspServer::start() {
 
 void RtspServer::submit(std::shared_ptr<FrameLease> frame) {
     if (!running_.load()) {
+        return;
+    }
+    // A zero-copy GstBuffer owns its libcamera request until every downstream
+    // element releases it. Always leave at least two requests available to the
+    // camera so a pipeline state transition cannot deadlock capture by holding
+    // the entire request pool.
+    const std::uint64_t reserve = std::min<std::uint64_t>(2, config_.buffer_count / 2);
+    if (metrics_.outstanding_leases.load() >= config_.buffer_count - reserve) {
+        metrics_.rtsp_dropped.fetch_add(1);
         return;
     }
     {
@@ -115,12 +165,29 @@ void RtspServer::mediaConfigure(GstRTSPMediaFactory *, GstRTSPMedia *media, gpoi
     static_cast<RtspServer *>(user_data)->onMediaConfigure(media);
 }
 
-void RtspServer::mediaUnprepared(GstRTSPMedia *, gpointer user_data) {
-    static_cast<RtspServer *>(user_data)->onMediaUnprepared();
+void RtspServer::mediaPrepared(GstRTSPMedia *media, gpointer user_data) {
+    static_cast<RtspServer *>(user_data)->onMediaPrepared(media);
 }
 
-void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
+void RtspServer::mediaUnprepared(GstRTSPMedia *media, gpointer user_data) {
+    static_cast<RtspServer *>(user_data)->onMediaUnprepared(media);
+}
+
+void RtspServer::mediaNewState(GstRTSPMedia *media, GstState state, gpointer user_data) {
+    static_cast<RtspServer *>(user_data)->onMediaNewState(media, state);
+}
+
+gboolean RtspServer::watchdogTick(gpointer user_data) {
+    return static_cast<RtspServer *>(user_data)->onWatchdog();
+}
+
+bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
     GstElement *element = gst_rtsp_media_get_element(media);
+    if (!element) {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] media pipeline has no root element\n";
+        return false;
+    }
     GstElement *source = gst_bin_get_by_name_recurse_up(GST_BIN(element), "source");
     gst_object_unref(element);
     if (!source || !GST_IS_APP_SRC(source)) {
@@ -129,7 +196,7 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
         }
         metrics_.rtsp_errors.fetch_add(1);
         std::cerr << "[rtsp] media pipeline has no appsrc\n";
-        return;
+        return false;
     }
 
     g_object_set(source,
@@ -138,6 +205,7 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
                  "do-timestamp", FALSE,
                  "block", FALSE,
                  nullptr);
+    gst_app_src_set_stream_type(GST_APP_SRC(source), GST_APP_STREAM_TYPE_STREAM);
     GstCaps *caps = gst_caps_new_simple("video/x-raw",
                                         "format", G_TYPE_STRING, "I420",
                                         "width", G_TYPE_INT, static_cast<int>(config_.main_width),
@@ -150,28 +218,225 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
                                         nullptr);
     gst_app_src_set_caps(GST_APP_SRC(source), caps);
     gst_caps_unref(caps);
+
+    GstAppSrc *previous = nullptr;
+    bool changed = false;
+    bool accepted = true;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        if (appsrc_) {
-            gst_object_unref(appsrc_);
+        if (current_media_ != media) {
+            accepted = false;
+        } else if (appsrc_ != GST_APP_SRC(source)) {
+            previous = appsrc_;
+            appsrc_ = GST_APP_SRC(source);  // gst_bin_get_by_name supplied this reference.
+            generation_.fetch_add(1);
+            changed = true;
         }
-        appsrc_ = GST_APP_SRC(source);  // gst_bin_get_by_name supplied this reference.
+    }
+    if (!accepted || !changed) {
+        gst_object_unref(source);
+    }
+    if (previous) {
+        gst_object_unref(previous);
+    }
+    if (changed) {
+        latest_.clear();
+        std::cout << "[rtsp] media source bound generation=" << generation_.load() << '\n';
+    }
+    return accepted;
+}
+
+void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
+    // The Pi's stateful V4L2 encoder retains imported DMABUFs when the same
+    // pipeline is prepared again. Retire it completely after unprepare and
+    // install a fresh shared factory instead of reusing encoder state.
+    gst_rtsp_media_set_reusable(media, FALSE);
+    gst_rtsp_media_set_stop_on_disconnect(media, FALSE);
+    gst_rtsp_media_set_eos_shutdown(media, FALSE);
+    gst_rtsp_media_set_suspend_mode(media, GST_RTSP_SUSPEND_MODE_NONE);
+
+    GstRTSPMedia *previous_media = nullptr;
+    GstAppSrc *previous_source = nullptr;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if (current_media_ != media) {
+            previous_media = current_media_;
+            previous_source = appsrc_;
+            current_media_ = static_cast<GstRTSPMedia *>(g_object_ref(media));
+            appsrc_ = nullptr;
+            generation_.fetch_add(1);
+            changed = true;
+        }
+    }
+    if (previous_source) {
+        gst_object_unref(previous_source);
+    }
+    if (previous_media) {
+        g_signal_handlers_disconnect_by_data(previous_media, this);
+        g_object_unref(previous_media);
+    }
+    if (changed) {
+        latest_.clear();
+        g_signal_connect(media, "prepared", G_CALLBACK(RtspServer::mediaPrepared), this);
+        g_signal_connect(media, "unprepared", G_CALLBACK(RtspServer::mediaUnprepared), this);
+        g_signal_connect(media, "new-state", G_CALLBACK(RtspServer::mediaNewState), this);
+        observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
+        status_since_us_.store(g_get_monotonic_time());
+    }
+    if (!bindMediaSource(media)) {
+        recovery_requested_.store(true);
+        return;
+    }
+    std::cout << "[rtsp] client media configured\n";
+}
+
+void RtspServer::onMediaPrepared(GstRTSPMedia *media) {
+    if (bindMediaSource(media)) {
+        consecutive_push_failures_.store(0);
+        std::cout << "[rtsp] client media prepared\n";
+    }
+}
+
+void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
+    GstRTSPMedia *retired_media = nullptr;
+    GstAppSrc *retired_source = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if (current_media_ == media) {
+            retired_media = current_media_;
+            retired_source = appsrc_;
+            current_media_ = nullptr;
+            appsrc_ = nullptr;
+            generation_.fetch_add(1);
+        }
+    }
+    if (!retired_media) {
+        std::cout << "[rtsp] ignored stale media release\n";
+        return;
+    }
+    latest_.clear();
+    consecutive_push_failures_.store(0);
+    recovery_requested_.store(false);
+    observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
+    status_since_us_.store(g_get_monotonic_time());
+    g_signal_handlers_disconnect_by_data(retired_media, this);
+    if (retired_source) {
+        gst_object_unref(retired_source);
+    }
+    g_object_unref(retired_media);
+    if (installFactory()) {
+        std::cout << "[rtsp] client media released; fresh factory installed\n";
+    } else {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] failed to refresh media factory after release\n";
+    }
+}
+
+void RtspServer::onMediaNewState(GstRTSPMedia *media, GstState state) {
+    if (state == GST_STATE_READY || state == GST_STATE_PAUSED || state == GST_STATE_PLAYING) {
+        bindMediaSource(media);
+    }
+    std::cout << "[rtsp] media state=" << gst_element_state_get_name(state) << '\n';
+}
+
+gboolean RtspServer::onWatchdog() {
+    if (!running_.load()) {
+        return G_SOURCE_REMOVE;
+    }
+
+    const gint64 now = g_get_monotonic_time();
+    if (now - last_session_cleanup_us_ >= 5 * G_USEC_PER_SEC) {
+        GstRTSPSessionPool *pool = gst_rtsp_server_get_session_pool(server_);
+        const guint removed = gst_rtsp_session_pool_cleanup(pool);
+        g_object_unref(pool);
+        if (removed > 0) {
+            std::cout << "[rtsp] cleaned " << removed << " expired session(s)\n";
+        }
+        last_session_cleanup_us_ = now;
+    }
+
+    if (recovery_requested_.exchange(false)) {
+        recoverMedia("repeated appsrc or media setup failure");
+        return G_SOURCE_CONTINUE;
+    }
+
+    GstRTSPMedia *media = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if (current_media_) {
+            media = static_cast<GstRTSPMedia *>(g_object_ref(current_media_));
+        }
+    }
+    if (!media) {
+        observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
+        status_since_us_.store(now);
+        return G_SOURCE_CONTINUE;
+    }
+
+    const GstRTSPMediaStatus status = gst_rtsp_media_get_status(media);
+    bool current = false;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        current = current_media_ == media;
+    }
+    g_object_unref(media);
+    if (!current) {
+        return G_SOURCE_CONTINUE;
+    }
+    if (status != observed_status_.load()) {
+        observed_status_.store(status);
+        status_since_us_.store(now);
+        std::cout << "[rtsp] media status=" << mediaStatusName(status) << '\n';
+    }
+    const gint64 status_age = now - status_since_us_.load();
+    if (status == GST_RTSP_MEDIA_STATUS_ERROR) {
+        recoverMedia("media entered error state");
+    } else if (status == GST_RTSP_MEDIA_STATUS_UNPREPARING &&
+               status_age >= 3 * G_USEC_PER_SEC) {
+        recoverMedia("media remained unpreparing for 3 seconds");
+    } else if (status == GST_RTSP_MEDIA_STATUS_PREPARING &&
+               status_age >= 10 * G_USEC_PER_SEC) {
+        recoverMedia("media remained preparing for 10 seconds");
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+void RtspServer::recoverMedia(const char *reason) {
+    GstRTSPMedia *media = nullptr;
+    GstAppSrc *source = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        media = current_media_;
+        source = appsrc_;
+        current_media_ = nullptr;
+        appsrc_ = nullptr;
         generation_.fetch_add(1);
     }
     latest_.clear();
-    g_signal_connect(media, "unprepared", G_CALLBACK(RtspServer::mediaUnprepared), this);
-    std::cout << "[rtsp] client media prepared\n";
-}
+    consecutive_push_failures_.store(0);
+    observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
+    status_since_us_.store(g_get_monotonic_time());
 
-void RtspServer::onMediaUnprepared() {
-    latest_.clear();
-    std::lock_guard<std::mutex> lock(source_mutex_);
-    if (appsrc_) {
-        gst_object_unref(appsrc_);
-        appsrc_ = nullptr;
+    if (media) {
+        g_signal_handlers_disconnect_by_data(media, this);
     }
-    generation_.fetch_add(1);
-    std::cout << "[rtsp] client media released\n";
+    if (source) {
+        gst_app_src_end_of_stream(source);
+        gst_object_unref(source);
+    }
+    if (media) {
+        gst_rtsp_media_unprepare(media);
+        g_object_unref(media);
+    }
+
+    if (!installFactory()) {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] recovery failed to replace media factory\n";
+        return;
+    }
+    metrics_.rtsp_recoveries.fetch_add(1);
+    std::cerr << "[rtsp] recovered media factory: " << reason << '\n';
 }
 
 GstBuffer *RtspServer::makeBuffer(std::shared_ptr<FrameLease> frame,
@@ -325,9 +590,16 @@ void RtspServer::feederLoop() {
         gst_object_unref(source);
         if (flow == GST_FLOW_OK) {
             metrics_.rtsp_pushed.fetch_add(1);
+            consecutive_push_failures_.store(0);
         } else if (flow != GST_FLOW_FLUSHING) {
             metrics_.rtsp_errors.fetch_add(1);
+            const unsigned failures = consecutive_push_failures_.fetch_add(1) + 1;
+            if (failures >= 3) {
+                recovery_requested_.store(true);
+            }
             std::cerr << "[rtsp] appsrc push failed: " << gst_flow_get_name(flow) << '\n';
+        } else {
+            consecutive_push_failures_.store(0);
         }
     }
 }
@@ -340,13 +612,26 @@ void RtspServer::stop() {
     if (feeder_thread_.joinable()) {
         feeder_thread_.join();
     }
+    if (watchdog_id_ != 0) {
+        g_source_remove(watchdog_id_);
+        watchdog_id_ = 0;
+    }
+    GstAppSrc *source = nullptr;
+    GstRTSPMedia *media = nullptr;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        if (appsrc_) {
-            gst_app_src_end_of_stream(appsrc_);
-            gst_object_unref(appsrc_);
-            appsrc_ = nullptr;
-        }
+        source = appsrc_;
+        media = current_media_;
+        appsrc_ = nullptr;
+        current_media_ = nullptr;
+        generation_.fetch_add(1);
+    }
+    if (media) {
+        g_signal_handlers_disconnect_by_data(media, this);
+    }
+    if (source) {
+        gst_app_src_end_of_stream(source);
+        gst_object_unref(source);
     }
     if (loop_) {
         g_main_loop_quit(loop_);
@@ -357,6 +642,13 @@ void RtspServer::stop() {
     if (attach_id_ != 0) {
         g_source_remove(attach_id_);
         attach_id_ = 0;
+    }
+    if (media) {
+        g_object_unref(media);
+    }
+    if (mounts_) {
+        g_object_unref(mounts_);
+        mounts_ = nullptr;
     }
     if (server_) {
         g_object_unref(server_);
