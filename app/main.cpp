@@ -166,7 +166,9 @@ int main(int argc, char **argv) {
                       << ",\"inference_dropped\":" << metrics.inference_dropped.load()
                       << ",\"capture_errors\":" << metrics.capture_errors.load()
                       << ",\"rtsp_errors\":" << metrics.rtsp_errors.load()
-                      << ",\"rtsp_recoveries\":" << metrics.rtsp_recoveries.load() << "}\n";
+                      << ",\"rtsp_recoveries\":" << metrics.rtsp_recoveries.load()
+                      << ",\"rtsp_recovery_failures\":"
+                      << metrics.rtsp_recovery_failures.load() << "}\n";
             last_capture = captured;
             last_rtsp = pushed;
             last_inference = inferred;
@@ -180,7 +182,12 @@ int main(int argc, char **argv) {
         std::cout << "[app] stopped captured=" << metrics.captured.load()
                   << " rtsp=" << metrics.rtsp_pushed.load()
                   << " inferred=" << metrics.inference_processed.load()
-                  << " outstanding=" << metrics.outstanding_leases.load() << '\n';
+                  << " outstanding=" << metrics.outstanding_leases.load()
+                  << " capture_errors=" << metrics.capture_errors.load()
+                  << " rtsp_errors=" << metrics.rtsp_errors.load()
+                  << " rtsp_recoveries=" << metrics.rtsp_recoveries.load()
+                  << " rtsp_recovery_failures="
+                  << metrics.rtsp_recovery_failures.load() << '\n';
         return metrics.outstanding_leases.load() == 0 ? 0 : 4;
     } catch (const std::exception &error) {
         std::cerr << "[fatal] " << error.what() << '\n';

@@ -68,6 +68,7 @@ private:
                                        gpointer user_data);
     static gboolean watchdogTick(gpointer user_data);
     static GstRTSPFilterResult closeClient(GstRTSPServer *, GstRTSPClient *client, gpointer);
+    static GstRTSPFilterResult removeSession(GstRTSPSessionPool *, GstRTSPSession *, gpointer);
     bool installFactory();
     bool bindMediaSource(GstRTSPMedia *media);
     MediaHandlers connectMediaHandlers(GstRTSPMedia *media);
@@ -95,6 +96,7 @@ private:
     gulong current_factory_handler_ = 0;
     guint attach_id_ = 0;
     guint watchdog_id_ = 0;
+    bool accepting_clients_ = false;
     std::thread loop_thread_;
     std::thread feeder_thread_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
@@ -112,9 +114,16 @@ private:
     unsigned consecutive_push_failures_ = 0;
     std::uint64_t recovery_generation_ = 0;
     std::string recovery_reason_;
+    gint64 recovery_started_us_ = 0;
+    bool recovery_failure_reported_ = false;
     GstRTSPMediaStatus observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
     gint64 status_since_us_ = 0;
     gint64 last_session_cleanup_us_ = 0;
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+    std::string test_push_error_trigger_;
+    unsigned test_push_errors_remaining_ = 0;
+    bool test_push_error_consumed_ = false;
+#endif
 };
 
 }  // namespace bsaps

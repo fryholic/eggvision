@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
 import re
 import socket
 import subprocess
@@ -60,14 +61,26 @@ def validate_log(log: str, return_code: int) -> None:
     failures: list[str] = []
     if return_code != 0:
         failures.append(f"server exit code was {return_code}, expected 0")
-    if not re.search(r"\[app\] stopped .*\boutstanding=0\b", log):
-        failures.append("final application log does not report outstanding=0")
-
-    capture_errors = [int(value) for value in re.findall(r'"capture_errors":(\d+)', log)]
-    if not capture_errors:
-        failures.append("no metrics record containing capture_errors was emitted")
-    elif any(value != 0 for value in capture_errors):
-        failures.append(f"capture_errors was non-zero: {capture_errors}")
+    final = re.search(
+        r"\[app\] stopped .*\boutstanding=(\d+)\b.*"
+        r"\bcapture_errors=(\d+)\b.*\brtsp_errors=(\d+)\b.*"
+        r"\brtsp_recovery_failures=(\d+)\b",
+        log,
+    )
+    if not final:
+        failures.append("final application log does not contain complete error/lease state")
+    else:
+        outstanding, capture_errors, rtsp_errors, recovery_failures = map(int, final.groups())
+        if outstanding != 0:
+            failures.append(f"final outstanding leases was {outstanding}, expected 0")
+        if capture_errors != 0:
+            failures.append(f"final capture_errors was {capture_errors}, expected 0")
+        if rtsp_errors != 0:
+            failures.append(f"final rtsp_errors was {rtsp_errors}, expected 0")
+        if recovery_failures != 0:
+            failures.append(
+                f"final rtsp_recovery_failures was {recovery_failures}, expected 0"
+            )
 
     critical = re.search(
         r"(?:GLib|GObject|GStreamer)[^\n]*CRITICAL|"
@@ -93,10 +106,13 @@ def run_case(
     with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-shutdown-") as directory:
         log_path = Path(directory) / "server.log"
         with log_path.open("wb") as log_file:
+            environment = os.environ.copy()
+            environment["G_DEBUG"] = "fatal-criticals"
             process = subprocess.Popen(
                 [str(app), "--no-inference", "--duration", str(duration)],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
+                env=environment,
             )
 
         ready = threading.Barrier(client_count + 1)

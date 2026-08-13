@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(BSAPS_BUILD_TESTS "Build unit tests" ON)
+option(BSAPS_ENABLE_TEST_HOOKS "Enable deterministic runtime fault-injection hooks" OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
@@ -42,6 +43,11 @@ target_link_libraries(bsaps_core
         Threads::Threads)
 
 target_compile_options(bsaps_core PRIVATE -Wall -Wextra -Wpedantic)
+if(BSAPS_ENABLE_TEST_HOOKS)
+    # RtspServer's test-only state is declared in a public header, so every
+    # translation unit that constructs it must see the same class layout.
+    target_compile_definitions(bsaps_core PUBLIC BSAPS_ENABLE_TEST_HOOKS=1)
+endif()
 
 add_executable(bsaps_app app/main.cpp)
 target_link_libraries(bsaps_app PRIVATE bsaps_core)
