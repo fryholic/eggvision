@@ -85,6 +85,9 @@ private:
     static gboolean cleanupSessions(GstRTSPSessionPool *pool, gpointer user_data);
     static GstRTSPFilterResult closeClient(GstRTSPServer *, GstRTSPClient *client, gpointer);
     static GstRTSPFilterResult removeSession(GstRTSPSessionPool *, GstRTSPSession *, gpointer);
+    GSource *createListenerSource();
+    GSource *createWatchdogSource();
+    static void destroySource(GSource *source);
     bool installFactory();
     bool bindMediaSource(GstRTSPMedia *media);
     MediaHandlers connectMediaHandlers(GstRTSPMedia *media);
@@ -106,6 +109,7 @@ private:
     bool recoverMedia(std::uint64_t expected_media_generation, const char *reason) noexcept;
     void finishRecoveryIfReady();
     void disableCallbacksAndWait();
+    void stopLocked();
     void feederLoop();
     GstBuffer *makeBuffer(std::shared_ptr<FrameLease> frame,
                           std::uint64_t base_timestamp,
@@ -118,8 +122,8 @@ private:
     GstRTSPMountPoints *mounts_ = nullptr;
     GstRTSPMediaFactory *current_factory_ = nullptr;
     gulong current_factory_handler_ = 0;
-    guint attach_id_ = 0;
-    guint watchdog_id_ = 0;
+    GSource *listener_source_ = nullptr;
+    GSource *watchdog_source_ = nullptr;
     gulong client_connected_handler_ = 0;
     bool accepting_clients_ = false;
     std::thread loop_thread_;
@@ -133,6 +137,9 @@ private:
     GstRTSPMedia *current_media_ = nullptr;
     MediaHandlers current_media_handlers_;
     std::shared_ptr<CallbackState> callback_state_;
+    // Serializes complete start/stop epochs. source_mutex_ remains the shorter
+    // callback/media lock and must never be used as the public lifecycle lock.
+    mutable std::mutex lifecycle_mutex_;
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> generation_{0};
     // The following lifecycle fields are protected by source_mutex_. Keeping
@@ -163,6 +170,8 @@ private:
     unsigned test_session_cleanup_delay_ms_ = 0;
     bool test_fail_recovery_thread_create_ = false;
     bool test_fail_cleanup_thread_create_ = false;
+    bool test_fail_feeder_thread_create_ = false;
+    bool test_fail_loop_thread_create_ = false;
 #endif
 };
 

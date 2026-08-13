@@ -143,12 +143,64 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
         g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE"), "1") == 0;
     test_fail_cleanup_thread_create_ =
         g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE"), "1") == 0;
+    test_fail_feeder_thread_create_ =
+        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE"), "1") == 0;
+    test_fail_loop_thread_create_ =
+        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_LOOP_THREAD_CREATE"), "1") == 0;
 #endif
     gst_init(nullptr, nullptr);
 }
 
 RtspServer::~RtspServer() {
     stop();
+}
+
+GSource *RtspServer::createListenerSource() {
+    if (!server_) {
+        return nullptr;
+    }
+    GError *error = nullptr;
+    GSource *source = gst_rtsp_server_create_source(server_, nullptr, &error);
+    if (!source) {
+        std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':'
+                  << config_.rtsp_port << ": "
+                  << (error && error->message ? error->message : "unknown error") << '\n';
+        g_clear_error(&error);
+        return nullptr;
+    }
+    if (g_source_attach(source, nullptr) == 0) {
+        std::cerr << "[rtsp] failed to attach listener source\n";
+        destroySource(source);
+        return nullptr;
+    }
+    return source;
+}
+
+GSource *RtspServer::createWatchdogSource() {
+    GSource *source = g_timeout_source_new(500);
+    if (!source) {
+        return nullptr;
+    }
+    g_source_set_priority(source, G_PRIORITY_DEFAULT);
+    g_source_set_callback(source,
+                          RtspServer::watchdogTick,
+                          newCallbackData(callback_state_),
+                          RtspServer::destroySourceCallbackData);
+    if (g_source_attach(source, nullptr) == 0) {
+        destroySource(source);
+        return nullptr;
+    }
+    return source;
+}
+
+void RtspServer::destroySource(GSource *source) {
+    if (!source) {
+        return;
+    }
+    if (!g_source_is_destroyed(source)) {
+        g_source_destroy(source);
+    }
+    g_source_unref(source);
 }
 
 bool RtspServer::installFactory() {
@@ -207,12 +259,63 @@ bool RtspServer::installFactory() {
 }
 
 bool RtspServer::start() {
-    if (running_.exchange(true)) {
-        return true;
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    if (running_.load()) {
+        std::cerr << "[rtsp] start rejected: server is already running\n";
+        return false;
+    }
+
+    // Every start publishes a fresh callback epoch. Signal/source closures from
+    // a previous epoch retain only its disabled CallbackState and therefore
+    // cannot re-enter this object after a restart.
+    try {
+        callback_state_ = std::make_shared<CallbackState>();
+    } catch (const std::bad_alloc &error) {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] failed to allocate callback epoch: " << error.what() << '\n';
+        return false;
+    }
+    callback_state_->server = this;
+    latest_.reopen();
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        running_.store(true);
+        listener_source_ = nullptr;
+        watchdog_source_ = nullptr;
+        accepting_clients_ = false;
+        appsrc_ = nullptr;
+        current_media_ = nullptr;
+        current_media_handlers_ = {};
+        current_factory_ = nullptr;
+        current_factory_handler_ = 0;
+        ++media_generation_;
+        consecutive_push_failures_ = 0;
+        recovery_state_ = RecoveryState::Idle;
+        recovery_generation_ = 0;
+        recovery_token_ = 0;
+        next_recovery_token_ = 0;
+        recovery_reason_.clear();
+        recovery_started_us_ = 0;
+        recovery_failure_reported_ = false;
+        recovery_media_unprepared_ = false;
+        recovery_job_.reset();
+        observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
+        status_since_us_ = g_get_monotonic_time();
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+        test_push_errors_remaining_ = 0;
+        test_push_error_consumed_ = false;
+        test_recovery_pause_reported_ = false;
+#endif
     }
 
     loop_ = g_main_loop_new(nullptr, FALSE);
     server_ = gst_rtsp_server_new();
+    if (!loop_ || !server_) {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] failed to allocate server main-loop state\n";
+        stopLocked();
+        return false;
+    }
     gst_rtsp_server_set_address(server_, config_.rtsp_address.c_str());
     gst_rtsp_server_set_service(server_, config_.rtsp_port.c_str());
     client_connected_handler_ = g_signal_connect_data(
@@ -225,13 +328,7 @@ bool RtspServer::start() {
     mounts_ = gst_rtsp_server_get_mount_points(server_);
     if (!installFactory()) {
         std::cerr << "[rtsp] failed to install media factory\n";
-        running_.store(false);
-        g_object_unref(mounts_);
-        mounts_ = nullptr;
-        g_object_unref(server_);
-        server_ = nullptr;
-        g_main_loop_unref(loop_);
-        loop_ = nullptr;
+        stopLocked();
         return false;
     }
 
@@ -240,41 +337,61 @@ bool RtspServer::start() {
     // thread after it has published Running state or transferred GObject refs.
     if (!startRecoveryWorker()) {
         std::cerr << "[rtsp] failed to start recovery teardown worker\n";
-        stop();
+        stopLocked();
         return false;
     }
 
-    const guint initial_attach_id = gst_rtsp_server_attach(server_, nullptr);
-    if (initial_attach_id == 0) {
-        std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':' << config_.rtsp_port << '\n';
-        stop();
+    GSource *initial_listener = createListenerSource();
+    if (!initial_listener) {
+        stopLocked();
         return false;
     }
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        attach_id_ = initial_attach_id;
+        listener_source_ = initial_listener;
         accepting_clients_ = true;
     }
 
     if (!startSessionCleanup()) {
         std::cerr << "[rtsp] failed to start session cleanup owner\n";
-        stop();
+        stopLocked();
         return false;
     }
 
-    status_since_us_ = g_get_monotonic_time();
-    watchdog_id_ = g_timeout_add_full(G_PRIORITY_DEFAULT,
-                                      500,
-                                      RtspServer::watchdogTick,
-                                      newCallbackData(callback_state_),
-                                      RtspServer::destroySourceCallbackData);
+    GSource *watchdog = createWatchdogSource();
+    if (!watchdog) {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] failed to attach watchdog source\n";
+        stopLocked();
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        watchdog_source_ = watchdog;
+    }
     try {
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+        if (test_fail_feeder_thread_create_) {
+            test_fail_feeder_thread_create_ = false;
+            throw std::system_error(
+                std::make_error_code(std::errc::resource_unavailable_try_again),
+                "test hook feeder thread creation failure");
+        }
+#endif
         feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+        if (test_fail_loop_thread_create_) {
+            test_fail_loop_thread_create_ = false;
+            throw std::system_error(
+                std::make_error_code(std::errc::resource_unavailable_try_again),
+                "test hook loop thread creation failure");
+        }
+#endif
         loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
     } catch (const std::system_error &error) {
         metrics_.rtsp_errors.fetch_add(1);
         std::cerr << "[rtsp] failed to start owner thread: " << error.what() << '\n';
-        stop();
+        stopLocked();
         return false;
     }
     std::cout << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
@@ -493,6 +610,7 @@ bool RtspServer::startSessionCleanup() {
     try {
 #ifdef BSAPS_ENABLE_TEST_HOOKS
         if (test_fail_cleanup_thread_create_) {
+            test_fail_cleanup_thread_create_ = false;
             throw std::system_error(
                 std::make_error_code(std::errc::resource_unavailable_try_again),
                 "test hook cleanup thread creation failure");
@@ -539,6 +657,7 @@ bool RtspServer::startRecoveryWorker() {
         auto state = std::make_shared<RecoveryWorkerState>();
 #ifdef BSAPS_ENABLE_TEST_HOOKS
         if (test_fail_recovery_thread_create_) {
+            test_fail_recovery_thread_create_ = false;
             throw std::system_error(
                 std::make_error_code(std::errc::resource_unavailable_try_again),
                 "test hook recovery thread creation failure");
@@ -1073,7 +1192,7 @@ gboolean RtspServer::onWatchdog() {
 bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
                               const char *reason) noexcept {
     std::uint64_t actual_media_generation = 0;
-    guint listener_source = 0;
+    GSource *listener_source = nullptr;
     bool begin_recovery = false;
     try {
         // Every throwing C++ allocation happens before any lifecycle field or
@@ -1129,8 +1248,8 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
 #endif
                 recovery_job_ = job;
                 status_since_us_ = g_get_monotonic_time();
-                listener_source = attach_id_;
-                attach_id_ = 0;
+                listener_source = listener_source_;
+                listener_source_ = nullptr;
                 accepting_clients_ = false;
                 worker_state->pending = std::move(job);
                 begin_recovery = true;
@@ -1150,9 +1269,7 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
         // a C++ exception. The job already owns all teardown refs if stop wins
         // this boundary.
         latest_.clear();
-        if (listener_source != 0) {
-            g_source_remove(listener_source);
-        }
+        destroySource(listener_source);
         worker_state->cv.notify_one();
         std::cerr << "[rtsp] recovery teardown started: "
                   << (reason ? reason : "media recovery requested") << '\n';
@@ -1232,7 +1349,7 @@ void RtspServer::finishRecoveryIfReady() {
     // G_CONNECT_AFTER guarantees the factory has evicted the non-reusable
     // media before recovery_media_unprepared_ becomes true. Only now is it
     // safe for a new request to construct fresh media from the stable factory.
-    const guint resumed_attach_id = gst_rtsp_server_attach(server_, nullptr);
+    GSource *resumed_listener = createListenerSource();
     bool resumed = false;
     bool report_attach_failure = false;
     {
@@ -1242,8 +1359,8 @@ void RtspServer::finishRecoveryIfReady() {
             recovery_media_unprepared_ && recovery_job_ &&
             recovery_job_->token == recovery_token_ &&
             recovery_job_->done.load(std::memory_order_acquire) &&
-            !accepting_clients_ && resumed_attach_id != 0) {
-            attach_id_ = resumed_attach_id;
+            !accepting_clients_ && resumed_listener != nullptr) {
+            listener_source_ = resumed_listener;
             accepting_clients_ = true;
             recovery_state_ = RecoveryState::Idle;
             recovery_generation_ = 0;
@@ -1254,13 +1371,13 @@ void RtspServer::finishRecoveryIfReady() {
             recovery_media_unprepared_ = false;
             recovery_job_.reset();
             resumed = true;
-        } else if (running_.load() && resumed_attach_id == 0) {
+        } else if (running_.load() && resumed_listener == nullptr) {
             report_attach_failure = !recovery_failure_reported_;
             recovery_failure_reported_ = true;
         }
     }
-    if (!resumed && resumed_attach_id != 0) {
-        g_source_remove(resumed_attach_id);
+    if (!resumed) {
+        destroySource(resumed_listener);
     }
     if (resumed) {
         metrics_.rtsp_recoveries.fetch_add(1);
@@ -1486,6 +1603,11 @@ void RtspServer::disableCallbacksAndWait() {
 }
 
 void RtspServer::stop() {
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    stopLocked();
+}
+
+void RtspServer::stopLocked() {
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
         if (!running_.load()) {
@@ -1499,16 +1621,16 @@ void RtspServer::stop() {
     if (feeder_thread_.joinable()) {
         feeder_thread_.join();
     }
-    guint watchdog_source = 0;
-    guint listener_source = 0;
+    GSource *watchdog_source = nullptr;
+    GSource *listener_source = nullptr;
     bool recovery_teardown_in_flight = false;
     std::shared_ptr<RecoveryJob> recovery_job;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        watchdog_source = watchdog_id_;
-        watchdog_id_ = 0;
-        listener_source = attach_id_;
-        attach_id_ = 0;
+        watchdog_source = watchdog_source_;
+        watchdog_source_ = nullptr;
+        listener_source = listener_source_;
+        listener_source_ = nullptr;
         accepting_clients_ = false;
         // A Requested recovery has not taken ownership of any GStreamer
         // object. Cancel it and let this stop path perform the complete normal
@@ -1524,12 +1646,8 @@ void RtspServer::stop() {
                       << recovery_token_ << '\n';
         }
     }
-    if (watchdog_source != 0) {
-        g_source_remove(watchdog_source);
-    }
-    if (listener_source != 0) {
-        g_source_remove(listener_source);
-    }
+    destroySource(watchdog_source);
+    destroySource(listener_source);
     requestSessionCleanupStop();
 
     // A finite teardown already in flight must finish before camera-owned

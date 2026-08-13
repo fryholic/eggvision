@@ -46,6 +46,15 @@ public:
         cv_.notify_all();
     }
 
+    // Reopen only after the previous consumer has stopped. This makes the
+    // capacity-one queue reusable by a new lifecycle epoch without allowing a
+    // frame retained by the previous epoch to cross the boundary.
+    void reopen() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        value_.reset();
+        closed_ = false;
+    }
+
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
@@ -54,4 +63,3 @@ private:
 };
 
 }  // namespace bsaps
-

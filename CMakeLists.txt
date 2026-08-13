@@ -60,6 +60,13 @@ if(BSAPS_BUILD_TESTS)
 
     add_executable(bsaps_model_smoke tests/model_smoke.cpp)
     target_link_libraries(bsaps_model_smoke PRIVATE openvino::runtime Threads::Threads)
+
+    if(BSAPS_ENABLE_TEST_HOOKS)
+        # Hardware integration harness: run manually on a Pi with a camera.
+        # It reuses one RtspServer across normal and fault-rollback epochs.
+        add_executable(bsaps_rtsp_restart_test tests/rtsp_restart_harness.cpp)
+        target_link_libraries(bsaps_rtsp_restart_test PRIVATE bsaps_core)
+    endif()
 endif()
 
 install(TARGETS bsaps_app RUNTIME DESTINATION bin)
