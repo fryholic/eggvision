@@ -28,6 +28,7 @@ void usage(const char *program) {
         << "  --model PATH          OpenVINO YOLOv5n XML (default models/yolov5n.xml)\n"
         << "  --port PORT           RTSP port (default 8554)\n"
         << "  --mount PATH          RTSP mount (default /stream)\n"
+        << "  --max-rtsp-sessions N Maximum concurrent/pending RTSP sessions (default 32)\n"
         << "  --bitrate BPS         H.264 bitrate (default 4000000)\n"
         << "  --confidence VALUE    person confidence threshold (default 0.30)\n"
         << "  --nms VALUE           NMS IoU threshold (default 0.45)\n"
@@ -53,6 +54,8 @@ bsaps::AppConfig parseArguments(int argc, char **argv) {
             config.rtsp_port = value(i);
         } else if (argument == "--mount") {
             config.rtsp_mount = value(i);
+        } else if (argument == "--max-rtsp-sessions") {
+            config.rtsp_max_sessions = static_cast<unsigned>(std::stoul(value(i)));
         } else if (argument == "--bitrate") {
             config.bitrate = static_cast<unsigned>(std::stoul(value(i)));
         } else if (argument == "--confidence") {
@@ -82,6 +85,9 @@ bsaps::AppConfig parseArguments(int argc, char **argv) {
     if (config.inference_threads == 0) {
         throw std::runtime_error("--inference-threads must be at least 1");
     }
+    if (config.rtsp_max_sessions == 0) {
+        throw std::runtime_error("--max-rtsp-sessions must be at least 1");
+    }
     return config;
 }
 
@@ -90,6 +96,7 @@ void printConfiguration(const bsaps::AppConfig &config) {
               << " lores=" << config.lores_width << 'x' << config.lores_height
               << " fps=" << config.fps << " buffers=" << config.buffer_count
               << " rtsp=" << config.rtsp_address << ':' << config.rtsp_port << config.rtsp_mount
+              << " max_rtsp_sessions=" << config.rtsp_max_sessions
               << " bitrate=" << config.bitrate << " gop=" << config.gop
               << " inference=" << (config.inference_enabled ? "on" : "off")
               << " model=" << config.model_path
@@ -168,7 +175,12 @@ int main(int argc, char **argv) {
                       << ",\"rtsp_errors\":" << metrics.rtsp_errors.load()
                       << ",\"rtsp_recoveries\":" << metrics.rtsp_recoveries.load()
                       << ",\"rtsp_recovery_failures\":"
-                      << metrics.rtsp_recovery_failures.load() << "}\n";
+                      << metrics.rtsp_recovery_failures.load()
+                      << ",\"rtsp_sessions_current\":"
+                      << metrics.rtsp_sessions_current.load()
+                      << ",\"rtsp_sessions_peak\":" << metrics.rtsp_sessions_peak.load()
+                      << ",\"rtsp_sessions_cleaned\":"
+                      << metrics.rtsp_sessions_cleaned.load() << "}\n";
             last_capture = captured;
             last_rtsp = pushed;
             last_inference = inferred;
@@ -187,7 +199,11 @@ int main(int argc, char **argv) {
                   << " rtsp_errors=" << metrics.rtsp_errors.load()
                   << " rtsp_recoveries=" << metrics.rtsp_recoveries.load()
                   << " rtsp_recovery_failures="
-                  << metrics.rtsp_recovery_failures.load() << '\n';
+                  << metrics.rtsp_recovery_failures.load()
+                  << " rtsp_sessions_current=" << metrics.rtsp_sessions_current.load()
+                  << " rtsp_sessions_peak=" << metrics.rtsp_sessions_peak.load()
+                  << " rtsp_sessions_cleaned=" << metrics.rtsp_sessions_cleaned.load()
+                  << '\n';
         return metrics.outstanding_leases.load() == 0 ? 0 : 4;
     } catch (const std::exception &error) {
         std::cerr << "[fatal] " << error.what() << '\n';

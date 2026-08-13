@@ -35,6 +35,13 @@ public:
 private:
     struct CallbackState;
     struct RecoveryJob;
+    struct SessionCleanupState;
+    enum class RecoveryState {
+        Idle,
+        Requested,
+        Running,
+        Completed,
+    };
     struct MediaHandlers {
         gulong prepared = 0;
         gulong unprepared = 0;
@@ -68,6 +75,13 @@ private:
                                        GstMessage *message,
                                        gpointer user_data);
     static gboolean watchdogTick(gpointer user_data);
+    static void clientConnected(GstRTSPServer *server,
+                                GstRTSPClient *client,
+                                gpointer user_data);
+    static void clientNewSession(GstRTSPClient *client,
+                                 GstRTSPSession *session,
+                                 gpointer user_data);
+    static gboolean cleanupSessions(GstRTSPSessionPool *pool, gpointer user_data);
     static GstRTSPFilterResult closeClient(GstRTSPServer *, GstRTSPClient *client, gpointer);
     static GstRTSPFilterResult removeSession(GstRTSPSessionPool *, GstRTSPSession *, gpointer);
     bool installFactory();
@@ -81,6 +95,10 @@ private:
     void onMediaNewState(GstRTSPMedia *media, GstState state);
     gboolean onMediaHandleMessage(GstRTSPMedia *media, GstMessage *message);
     gboolean onWatchdog();
+    void onClientConnected(GstRTSPClient *client);
+    void onClientNewSession(GstRTSPSession *session);
+    bool startSessionCleanup();
+    void requestSessionCleanupStop();
     bool recoverMedia(std::uint64_t expected_media_generation, const char *reason);
     void finishRecoveryIfReady();
     void disableCallbacksAndWait();
@@ -98,9 +116,11 @@ private:
     gulong current_factory_handler_ = 0;
     guint attach_id_ = 0;
     guint watchdog_id_ = 0;
+    gulong client_connected_handler_ = 0;
     bool accepting_clients_ = false;
     std::thread loop_thread_;
     std::thread feeder_thread_;
+    std::shared_ptr<SessionCleanupState> session_cleanup_state_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
     mutable std::mutex source_mutex_;
     GstAppSrc *appsrc_ = nullptr;
@@ -114,7 +134,10 @@ private:
     // pipeline callback from retiring a newly configured pipeline.
     std::uint64_t media_generation_ = 0;
     unsigned consecutive_push_failures_ = 0;
+    RecoveryState recovery_state_ = RecoveryState::Idle;
     std::uint64_t recovery_generation_ = 0;
+    std::uint64_t recovery_token_ = 0;
+    std::uint64_t next_recovery_token_ = 0;
     std::string recovery_reason_;
     gint64 recovery_started_us_ = 0;
     bool recovery_failure_reported_ = false;
@@ -127,6 +150,11 @@ private:
     unsigned test_push_errors_remaining_ = 0;
     bool test_push_error_consumed_ = false;
     unsigned test_teardown_delay_ms_ = 0;
+    unsigned test_watchdog_recovery_delay_ms_ = 0;
+    std::string test_recovery_pause_path_;
+    bool test_recovery_pause_reported_ = false;
+    unsigned test_session_timeout_seconds_ = 0;
+    unsigned test_session_cleanup_delay_ms_ = 0;
 #endif
 };
 

@@ -14,6 +14,9 @@ struct Metrics {
     std::atomic<std::uint64_t> rtsp_errors{0};
     std::atomic<std::uint64_t> rtsp_recoveries{0};
     std::atomic<std::uint64_t> rtsp_recovery_failures{0};
+    std::atomic<std::uint64_t> rtsp_sessions_current{0};
+    std::atomic<std::uint64_t> rtsp_sessions_peak{0};
+    std::atomic<std::uint64_t> rtsp_sessions_cleaned{0};
     std::atomic<std::uint64_t> inference_processed{0};
     std::atomic<std::uint64_t> inference_dropped{0};
     std::atomic<std::uint64_t> detected_persons{0};
