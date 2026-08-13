@@ -29,8 +29,15 @@ public:
 
     bool start();
     void submit(std::shared_ptr<FrameLease> frame);
+    // Synchronous lifetime boundary: returns only after recovery workers and
+    // every GStreamer object owned by this server have released their leases.
+    // A stalled teardown is reported periodically and keeps blocking safely.
     void stop();
     std::string url(const std::string &host) const;
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+    bool recoveryRunningForTest() const;
+    bool runningForTest() const { return running_.load(std::memory_order_acquire); }
+#endif
 
 private:
     struct CallbackState;
@@ -104,7 +111,7 @@ private:
     bool startSessionCleanup();
     void requestSessionCleanupStop();
     bool startRecoveryWorker();
-    void requestRecoveryWorkerStop(bool detach_in_flight);
+    void requestRecoveryWorkerStop();
     static void recoveryWorkerLoop(const std::shared_ptr<RecoveryWorkerState> &state);
     bool recoverMedia(std::uint64_t expected_media_generation, const char *reason) noexcept;
     void finishRecoveryIfReady();

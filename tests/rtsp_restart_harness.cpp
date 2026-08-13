@@ -5,7 +5,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -19,7 +21,7 @@ namespace {
 
 constexpr GstClockTime kProbeTimeout = 10 * GST_SECOND;
 
-bool receiveRtp(const std::string &url) {
+bool receiveRtp(const std::string &url, GstElement **held_pipeline = nullptr) {
     const std::string pipeline_description =
         "rtspsrc location=" + url +
         " protocols=tcp latency=0 timeout=5000000 "
@@ -64,13 +66,27 @@ bool receiveRtp(const std::string &url) {
     if (sample) {
         gst_sample_unref(sample);
     }
-    gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (held_pipeline && sample) {
+        *held_pipeline = pipeline;
+    } else {
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+    }
     if (sink) {
         gst_object_unref(sink);
     }
-    gst_object_unref(pipeline);
+    if (!held_pipeline || !sample) {
+        gst_object_unref(pipeline);
+    }
     g_clear_error(&error);
     return sample != nullptr;
+}
+
+void stopRtp(GstElement *pipeline) {
+    if (!pipeline) {
+        return;
+    }
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
 }
 
 void configureFailure(const std::string &stage) {
@@ -101,6 +117,18 @@ void configureFailure(const std::string &stage) {
     g_setenv(variable, "1", TRUE);
 }
 
+template <typename Predicate>
+bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -110,10 +138,26 @@ int main(int argc, char **argv) {
         const unsigned target_epochs = argc > 3
                                            ? static_cast<unsigned>(std::stoul(argv[3]))
                                            : (failure_stage == "none" ? 2U : 1U);
-        if (target_epochs == 0) {
-            throw std::runtime_error("epoch count must be positive");
+        const unsigned delayed_recovery_ms = argc > 4
+                                                 ? static_cast<unsigned>(std::stoul(argv[4]))
+                                                 : 0U;
+        if (target_epochs == 0 || (delayed_recovery_ms != 0 && target_epochs < 2)) {
+            throw std::runtime_error(
+                "epoch count must be positive and delayed recovery requires two epochs");
         }
         configureFailure(failure_stage);
+        const std::string recovery_trigger =
+            "/tmp/bsaps-rtsp-restart-" + port + ".trigger";
+        std::remove(recovery_trigger.c_str());
+        if (delayed_recovery_ms != 0) {
+            g_setenv("BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER", recovery_trigger.c_str(), TRUE);
+            g_setenv("BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS",
+                     std::to_string(delayed_recovery_ms).c_str(),
+                     TRUE);
+        } else {
+            g_unsetenv("BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER");
+            g_unsetenv("BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS");
+        }
 
         bsaps::AppConfig config;
         config.inference_enabled = false;
@@ -174,11 +218,65 @@ int main(int argc, char **argv) {
             if (server.start()) {
                 throw std::runtime_error("concurrent/running start was not rejected");
             }
-            if (!receiveRtp(url)) {
+            GstElement *held_client = nullptr;
+            if (!receiveRtp(url,
+                            epoch == 1 && delayed_recovery_ms != 0
+                                ? &held_client
+                                : nullptr)) {
                 throw std::runtime_error("RTP timeout at epoch " + std::to_string(epoch));
             }
             ++successful_epochs;
             std::cout << "[restart-test] epoch=" << epoch << " RTP received\n";
+            if (epoch == 1 && delayed_recovery_ms != 0) {
+                if (!g_file_set_contents(recovery_trigger.c_str(), "", 0, nullptr)) {
+                    throw std::runtime_error("failed to create recovery trigger");
+                }
+                if (!waitUntil([&server] { return server.recoveryRunningForTest(); },
+                               std::chrono::seconds(5))) {
+                    stopRtp(held_client);
+                    throw std::runtime_error("delayed recovery did not enter Running state");
+                }
+
+                const auto stop_started = std::chrono::steady_clock::now();
+                std::thread stopper([&server] { server.stop(); });
+                if (!waitUntil([&server] { return !server.runningForTest(); },
+                               std::chrono::seconds(3))) {
+                    stopper.join();
+                    stopRtp(held_client);
+                    throw std::runtime_error("stop did not publish the stopped state");
+                }
+                // start() must be serialized behind the still-running old
+                // teardown. Remove the one-shot trigger before it can enter
+                // the next epoch, then prove restart cannot overtake stop().
+                std::remove(recovery_trigger.c_str());
+                auto restart = std::async(std::launch::async, [&server] {
+                    return server.start();
+                });
+                if (restart.wait_for(std::chrono::seconds(1)) !=
+                    std::future_status::timeout) {
+                    stopper.join();
+                    stopRtp(held_client);
+                    throw std::runtime_error(
+                        "same-object restart overtook the previous recovery job");
+                }
+                stopper.join();
+                stopRtp(held_client);
+                if (!restart.get()) {
+                    throw std::runtime_error("same-object restart failed after recovery join");
+                }
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - stop_started);
+                const auto minimum = std::chrono::milliseconds(delayed_recovery_ms) -
+                                     std::chrono::milliseconds(500);
+                if (elapsed < minimum) {
+                    throw std::runtime_error(
+                        "stop returned before delayed recovery ownership was released");
+                }
+                next_epoch_already_started = true;
+                std::cout << "[restart-test] delayed recovery joined before restart elapsed_ms="
+                          << elapsed.count() << '\n';
+                continue;
+            }
             if (epoch != target_epochs) {
                 std::atomic<bool> go{false};
                 bool restart_won = false;
@@ -212,6 +310,7 @@ int main(int argc, char **argv) {
         }
         std::cout << "[restart-test] passed stage=" << failure_stage
                   << " successful_epochs=" << successful_epochs
+                  << " delayed_recovery_ms=" << delayed_recovery_ms
                   << " outstanding=0 rtsp_errors=" << metrics.rtsp_errors.load()
                   << " recovery_failures=" << metrics.rtsp_recovery_failures.load() << '\n';
         return 0;

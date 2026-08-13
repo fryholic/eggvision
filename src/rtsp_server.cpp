@@ -732,7 +732,7 @@ void RtspServer::recoveryWorkerLoop(
     }
 }
 
-void RtspServer::requestRecoveryWorkerStop(bool detach_in_flight) {
+void RtspServer::requestRecoveryWorkerStop() {
     std::shared_ptr<RecoveryWorkerState> state;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
@@ -748,14 +748,11 @@ void RtspServer::requestRecoveryWorkerStop(bool detach_in_flight) {
     if (!recovery_worker_thread_.joinable()) {
         return;
     }
-    // The worker owns only RecoveryWorkerState/RecoveryJob and GObject refs.
-    // After the existing bounded deadline it is safe to detach a wedged job;
-    // normal startup/shutdown always joins the persistent owner.
-    if (detach_in_flight) {
-        recovery_worker_thread_.detach();
-    } else {
-        recovery_worker_thread_.join();
-    }
+    // RecoveryJob's GObject graph can own GstBuffers whose qdata owns a
+    // FrameLease. That lease still accounts against Metrics and represents a
+    // camera request, so the worker is part of this object's shutdown graph.
+    // It must never outlive stop()/the next start epoch.
+    recovery_worker_thread_.join();
 }
 
 void RtspServer::requestSessionCleanupStop() {
@@ -1623,7 +1620,6 @@ void RtspServer::stopLocked() {
     }
     GSource *watchdog_source = nullptr;
     GSource *listener_source = nullptr;
-    bool recovery_teardown_in_flight = false;
     std::shared_ptr<RecoveryJob> recovery_job;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
@@ -1634,13 +1630,12 @@ void RtspServer::stopLocked() {
         accepting_clients_ = false;
         // A Requested recovery has not taken ownership of any GStreamer
         // object. Cancel it and let this stop path perform the complete normal
-        // teardown. Only a Running job can make stop wait or skip concurrent
-        // access after the bounded deadline.
+        // teardown. A Running job must complete before this stop epoch can
+        // release camera-owned leases or permit the next start epoch.
         if (recovery_state_ == RecoveryState::Running && recovery_job_ &&
             recovery_job_->token == recovery_token_ &&
             !recovery_job_->done.load(std::memory_order_acquire)) {
             recovery_job = recovery_job_;
-            recovery_teardown_in_flight = true;
         } else if (recovery_state_ == RecoveryState::Requested) {
             std::cerr << "[rtsp] pending recovery cancelled by stop token="
                       << recovery_token_ << '\n';
@@ -1650,20 +1645,24 @@ void RtspServer::stopLocked() {
     destroySource(listener_source);
     requestSessionCleanupStop();
 
-    // A finite teardown already in flight must finish before camera-owned
-    // DMABUF leases can be reported as released. Keep the owner loop and
-    // callbacks alive while waiting; the worker's completion never depends on
-    // this thread. A bounded wait prevents an indefinitely wedged driver from
-    // hanging process shutdown forever.
-    if (recovery_teardown_in_flight && recovery_job) {
+    // A teardown already in flight must finish before camera-owned DMABUF
+    // leases can be reported as released. Keep the owner loop, callbacks,
+    // Metrics and the CameraCapture owner alive while waiting. Fifteen seconds
+    // is an operational warning boundary, not a lifetime boundary: detaching
+    // here would let GstBuffer qdata release FrameLease after its owners were
+    // destroyed. If a driver really stalls forever the process deliberately
+    // remains in this explicit delayed-shutdown state and reports progress,
+    // rather than returning from stop() with unsafe background references.
+    if (recovery_job) {
+        constexpr auto warning_boundary = std::chrono::seconds(15);
+        constexpr auto warning_interval = std::chrono::seconds(5);
+        const auto wait_started = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock(recovery_job->mutex);
-        const bool completed = recovery_job->cv.wait_for(
+        bool completed = recovery_job->cv.wait_for(
             lock,
-            std::chrono::seconds(15),
+            warning_boundary,
             [&recovery_job] { return recovery_job->done.load(std::memory_order_acquire); });
-        if (completed) {
-            recovery_teardown_in_flight = false;
-        } else {
+        if (!completed) {
             bool report_failure = false;
             {
                 std::lock_guard<std::mutex> source_lock(source_mutex_);
@@ -1674,15 +1673,32 @@ void RtspServer::stopLocked() {
                 metrics_.rtsp_errors.fetch_add(1);
                 metrics_.rtsp_recovery_failures.fetch_add(1);
             }
-            std::cerr << "[rtsp] stop failed: recovery teardown exceeded 15 seconds\n";
+            do {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - wait_started);
+                std::cerr << "[rtsp] shutdown delayed: recovery teardown token="
+                          << recovery_job->token << " still running after "
+                          << elapsed.count()
+                          << " seconds; retaining owners and waiting safely\n";
+                completed = recovery_job->cv.wait_for(
+                    lock,
+                    warning_interval,
+                    [&recovery_job] {
+                        return recovery_job->done.load(std::memory_order_acquire);
+                    });
+            } while (!completed);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - wait_started);
+            std::cerr << "[rtsp] delayed recovery teardown completed token="
+                      << recovery_job->token << " elapsed_ms=" << elapsed.count()
+                      << "; shutdown continuing\n";
         }
     }
 
-    // No new job can be published after running_=false. Normally the
-    // persistent owner is joined. Only a job that exceeded the existing
-    // bounded stop deadline is detached; its shared state and GObject refs are
-    // independent of RtspServer and remain valid until that job returns.
-    requestRecoveryWorkerStop(recovery_teardown_in_flight);
+    // No new job can be published after running_=false. Always join the
+    // persistent owner before callbacks, media, Metrics or a subsequent start
+    // epoch can proceed.
+    requestRecoveryWorkerStop();
 
     if (server_ && client_connected_handler_ != 0 &&
         g_signal_handler_is_connected(server_, client_connected_handler_)) {
@@ -1736,7 +1752,7 @@ void RtspServer::stopLocked() {
     if (mounts_) {
         gst_rtsp_mount_points_remove_factory(mounts_, config_.rtsp_mount.c_str());
     }
-    if (server_ && !recovery_teardown_in_flight) {
+    if (server_) {
         GList *clients = gst_rtsp_server_client_filter(server_, RtspServer::closeClient, nullptr);
         g_list_free_full(clients, g_object_unref);
     }
@@ -1744,7 +1760,7 @@ void RtspServer::stopLocked() {
     if (source) {
         gst_app_src_end_of_stream(source);
     }
-    if (media && !recovery_teardown_in_flight) {
+    if (media) {
         gst_rtsp_media_set_pipeline_state(media, GST_STATE_NULL);
         gst_rtsp_media_unprepare(media);
     }
@@ -1781,5 +1797,13 @@ void RtspServer::stopLocked() {
 std::string RtspServer::url(const std::string &host) const {
     return "rtsp://" + host + ':' + config_.rtsp_port + config_.rtsp_mount;
 }
+
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+bool RtspServer::recoveryRunningForTest() const {
+    std::lock_guard<std::mutex> lock(source_mutex_);
+    return recovery_state_ == RecoveryState::Running && recovery_job_ &&
+           !recovery_job_->done.load(std::memory_order_acquire);
+}
+#endif
 
 }  // namespace bsaps
