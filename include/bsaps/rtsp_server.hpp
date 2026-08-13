@@ -34,6 +34,7 @@ public:
 
 private:
     struct CallbackState;
+    struct RecoveryJob;
     struct MediaHandlers {
         gulong prepared = 0;
         gulong unprepared = 0;
@@ -81,6 +82,7 @@ private:
     gboolean onMediaHandleMessage(GstRTSPMedia *media, GstMessage *message);
     gboolean onWatchdog();
     bool recoverMedia(std::uint64_t expected_media_generation, const char *reason);
+    void finishRecoveryIfReady();
     void disableCallbacksAndWait();
     void feederLoop();
     GstBuffer *makeBuffer(std::shared_ptr<FrameLease> frame,
@@ -116,13 +118,15 @@ private:
     std::string recovery_reason_;
     gint64 recovery_started_us_ = 0;
     bool recovery_failure_reported_ = false;
+    bool recovery_media_unprepared_ = false;
+    std::shared_ptr<RecoveryJob> recovery_job_;
     GstRTSPMediaStatus observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
     gint64 status_since_us_ = 0;
-    gint64 last_session_cleanup_us_ = 0;
 #ifdef BSAPS_ENABLE_TEST_HOOKS
     std::string test_push_error_trigger_;
     unsigned test_push_errors_remaining_ = 0;
     bool test_push_error_consumed_ = false;
+    unsigned test_teardown_delay_ms_ = 0;
 #endif
 };
 
