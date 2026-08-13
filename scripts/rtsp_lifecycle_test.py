@@ -207,6 +207,18 @@ class RtspConnection:
     def teardown(self) -> None:
         self.require(self.request("TEARDOWN"), {200}, "TEARDOWN")
 
+    def wait_for_server_close(self) -> None:
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            self.socket.settimeout(min(1.0, max(remaining, 0.01)))
+            try:
+                if not self.socket.recv(65536):
+                    return
+            except socket.timeout:
+                continue
+        raise TimeoutError("RTSP server did not close the active client")
+
 
 def abusive_session(url: str, timeout: float, mode: str) -> None:
     connection = RtspConnection(url, timeout)
@@ -244,6 +256,11 @@ def main() -> int:
     parser.add_argument("--cycles", type=int, default=30)
     parser.add_argument("--settle-ms", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--hold-until-server-close",
+        action="store_true",
+        help="keep one playing client active and require the server to close it",
+    )
     args = parser.parse_args()
     if args.cycles < 1 or args.settle_ms < 0 or args.timeout <= 0:
         parser.error("cycles and timeout must be positive; settle-ms must be non-negative")
@@ -254,6 +271,18 @@ def main() -> int:
     index = 0
     phase = "startup"
     try:
+        if args.hold_until_server_close:
+            connection = RtspConnection(args.url, args.timeout)
+            try:
+                phase = "active session startup"
+                connection.start()
+                phase = "waiting for server shutdown"
+                connection.wait_for_server_close()
+            finally:
+                connection.close()
+            print("active RTSP client was closed by server", flush=True)
+            return 0
+
         for index in range(args.cycles):
             mode = modes[index % len(modes)]
             phase = "abusive session"

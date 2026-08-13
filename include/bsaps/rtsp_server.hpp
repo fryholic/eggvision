@@ -6,6 +6,7 @@
 #include "bsaps/metrics.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -32,7 +33,32 @@ public:
     std::string url(const std::string &host) const;
 
 private:
-    static void mediaConfigure(GstRTSPMediaFactory *, GstRTSPMedia *media, gpointer user_data);
+    struct CallbackState;
+    struct MediaHandlers {
+        gulong prepared = 0;
+        gulong unprepared = 0;
+        gulong target_state = 0;
+        gulong new_state = 0;
+        gulong handle_message = 0;
+    };
+    class CallbackGuard {
+    public:
+        explicit CallbackGuard(gpointer user_data);
+        ~CallbackGuard();
+
+        RtspServer *server() const { return server_; }
+
+    private:
+        std::shared_ptr<CallbackState> state_;
+        RtspServer *server_ = nullptr;
+    };
+
+    static gpointer newCallbackData(const std::shared_ptr<CallbackState> &state);
+    static void destroySignalCallbackData(gpointer data, GClosure *);
+    static void destroySourceCallbackData(gpointer data);
+    static void mediaConfigure(GstRTSPMediaFactory *factory,
+                               GstRTSPMedia *media,
+                               gpointer user_data);
     static void mediaPrepared(GstRTSPMedia *media, gpointer user_data);
     static void mediaUnprepared(GstRTSPMedia *media, gpointer user_data);
     static void mediaTargetState(GstRTSPMedia *media, GstState state, gpointer user_data);
@@ -41,9 +67,12 @@ private:
                                        GstMessage *message,
                                        gpointer user_data);
     static gboolean watchdogTick(gpointer user_data);
+    static GstRTSPFilterResult closeClient(GstRTSPServer *, GstRTSPClient *client, gpointer);
     bool installFactory();
     bool bindMediaSource(GstRTSPMedia *media);
-    void onMediaConfigure(GstRTSPMedia *media);
+    MediaHandlers connectMediaHandlers(GstRTSPMedia *media);
+    static void disconnectMediaHandlers(GstRTSPMedia *media, const MediaHandlers &handlers);
+    void onMediaConfigure(GstRTSPMediaFactory *factory, GstRTSPMedia *media);
     void onMediaPrepared(GstRTSPMedia *media);
     void onMediaUnprepared(GstRTSPMedia *media);
     void onMediaTargetState(GstRTSPMedia *media, GstState state);
@@ -51,6 +80,7 @@ private:
     gboolean onMediaHandleMessage(GstRTSPMedia *media, GstMessage *message);
     gboolean onWatchdog();
     bool recoverMedia(std::uint64_t expected_media_generation, const char *reason);
+    void disableCallbacksAndWait();
     void feederLoop();
     GstBuffer *makeBuffer(std::shared_ptr<FrameLease> frame,
                           std::uint64_t base_timestamp,
@@ -61,6 +91,8 @@ private:
     GMainLoop *loop_ = nullptr;
     GstRTSPServer *server_ = nullptr;
     GstRTSPMountPoints *mounts_ = nullptr;
+    GstRTSPMediaFactory *current_factory_ = nullptr;
+    gulong current_factory_handler_ = 0;
     guint attach_id_ = 0;
     guint watchdog_id_ = 0;
     std::thread loop_thread_;
@@ -69,6 +101,8 @@ private:
     mutable std::mutex source_mutex_;
     GstAppSrc *appsrc_ = nullptr;
     GstRTSPMedia *current_media_ = nullptr;
+    MediaHandlers current_media_handlers_;
+    std::shared_ptr<CallbackState> callback_state_;
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> generation_{0};
     // The following lifecycle fields are protected by source_mutex_. Keeping

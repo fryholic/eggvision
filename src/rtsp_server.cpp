@@ -25,8 +25,51 @@ void destroyLease(gpointer data) {
 
 }  // namespace
 
+struct RtspServer::CallbackState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    RtspServer *server = nullptr;
+    unsigned active = 0;
+};
+
+RtspServer::CallbackGuard::CallbackGuard(gpointer user_data) {
+    auto *holder = static_cast<std::shared_ptr<CallbackState> *>(user_data);
+    if (!holder) {
+        return;
+    }
+    state_ = *holder;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->server) {
+        server_ = state_->server;
+        ++state_->active;
+    }
+}
+
+RtspServer::CallbackGuard::~CallbackGuard() {
+    if (!server_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (--state_->active == 0) {
+        state_->cv.notify_all();
+    }
+}
+
+gpointer RtspServer::newCallbackData(const std::shared_ptr<CallbackState> &state) {
+    return new std::shared_ptr<CallbackState>(state);
+}
+
+void RtspServer::destroySignalCallbackData(gpointer data, GClosure *) {
+    delete static_cast<std::shared_ptr<CallbackState> *>(data);
+}
+
+void RtspServer::destroySourceCallbackData(gpointer data) {
+    delete static_cast<std::shared_ptr<CallbackState> *>(data);
+}
+
 RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
-    : config_(config), metrics_(metrics) {
+    : config_(config), metrics_(metrics), callback_state_(std::make_shared<CallbackState>()) {
+    callback_state_->server = this;
     gst_init(nullptr, nullptr);
 }
 
@@ -35,7 +78,7 @@ RtspServer::~RtspServer() {
 }
 
 bool RtspServer::installFactory() {
-    if (!mounts_) {
+    if (!running_.load() || !mounts_) {
         return false;
     }
 
@@ -67,8 +110,35 @@ bool RtspServer::installFactory() {
     gst_rtsp_media_factory_set_protocols(
         factory, static_cast<GstRTSPLowerTrans>(GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_TCP));
     gst_rtsp_media_factory_set_latency(factory, 50);
-    g_signal_connect(factory, "media-configure", G_CALLBACK(RtspServer::mediaConfigure), this);
+    const gulong handler = g_signal_connect_data(
+        factory,
+        "media-configure",
+        G_CALLBACK(RtspServer::mediaConfigure),
+        newCallbackData(callback_state_),
+        RtspServer::destroySignalCallbackData,
+        static_cast<GConnectFlags>(0));
+
+    GstRTSPMediaFactory *previous_factory = nullptr;
+    gulong previous_handler = 0;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if (!running_.load()) {
+            g_signal_handler_disconnect(factory, handler);
+            g_object_unref(factory);
+            return false;
+        }
+        previous_factory = current_factory_;
+        previous_handler = current_factory_handler_;
+        current_factory_ = static_cast<GstRTSPMediaFactory *>(g_object_ref(factory));
+        current_factory_handler_ = handler;
+    }
     gst_rtsp_mount_points_add_factory(mounts_, config_.rtsp_mount.c_str(), factory);
+    if (previous_factory) {
+        if (previous_handler != 0) {
+            g_signal_handler_disconnect(previous_factory, previous_handler);
+        }
+        g_object_unref(previous_factory);
+    }
     return true;
 }
 
@@ -98,6 +168,22 @@ bool RtspServer::start() {
     if (attach_id_ == 0) {
         std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':' << config_.rtsp_port << '\n';
         running_.store(false);
+        GstRTSPMediaFactory *factory = nullptr;
+        gulong factory_handler = 0;
+        {
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            factory = current_factory_;
+            factory_handler = current_factory_handler_;
+            current_factory_ = nullptr;
+            current_factory_handler_ = 0;
+        }
+        if (factory) {
+            if (factory_handler != 0) {
+                g_signal_handler_disconnect(factory, factory_handler);
+            }
+            gst_rtsp_mount_points_remove_factory(mounts_, config_.rtsp_mount.c_str());
+            g_object_unref(factory);
+        }
         g_object_unref(mounts_);
         mounts_ = nullptr;
         g_object_unref(server_);
@@ -109,7 +195,11 @@ bool RtspServer::start() {
 
     status_since_us_ = g_get_monotonic_time();
     last_session_cleanup_us_ = status_since_us_;
-    watchdog_id_ = g_timeout_add(500, RtspServer::watchdogTick, this);
+    watchdog_id_ = g_timeout_add_full(G_PRIORITY_DEFAULT,
+                                      500,
+                                      RtspServer::watchdogTick,
+                                      newCallbackData(callback_state_),
+                                      RtspServer::destroySourceCallbackData);
     feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
     loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
     std::cout << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
@@ -142,34 +232,101 @@ void RtspServer::submit(std::shared_ptr<FrameLease> frame) {
     }
 }
 
-void RtspServer::mediaConfigure(GstRTSPMediaFactory *, GstRTSPMedia *media, gpointer user_data) {
-    static_cast<RtspServer *>(user_data)->onMediaConfigure(media);
+void RtspServer::mediaConfigure(GstRTSPMediaFactory *factory,
+                                GstRTSPMedia *media,
+                                gpointer user_data) {
+    CallbackGuard guard(user_data);
+    if (guard.server()) {
+        guard.server()->onMediaConfigure(factory, media);
+    }
 }
 
 void RtspServer::mediaPrepared(GstRTSPMedia *media, gpointer user_data) {
-    static_cast<RtspServer *>(user_data)->onMediaPrepared(media);
+    CallbackGuard guard(user_data);
+    if (guard.server()) {
+        guard.server()->onMediaPrepared(media);
+    }
 }
 
 void RtspServer::mediaUnprepared(GstRTSPMedia *media, gpointer user_data) {
-    static_cast<RtspServer *>(user_data)->onMediaUnprepared(media);
+    CallbackGuard guard(user_data);
+    if (guard.server()) {
+        guard.server()->onMediaUnprepared(media);
+    }
 }
 
 void RtspServer::mediaTargetState(GstRTSPMedia *media, GstState state, gpointer user_data) {
-    static_cast<RtspServer *>(user_data)->onMediaTargetState(media, state);
+    CallbackGuard guard(user_data);
+    if (guard.server()) {
+        guard.server()->onMediaTargetState(media, state);
+    }
 }
 
 void RtspServer::mediaNewState(GstRTSPMedia *media, GstState state, gpointer user_data) {
-    static_cast<RtspServer *>(user_data)->onMediaNewState(media, state);
+    CallbackGuard guard(user_data);
+    if (guard.server()) {
+        guard.server()->onMediaNewState(media, state);
+    }
 }
 
 gboolean RtspServer::mediaHandleMessage(GstRTSPMedia *media,
                                         GstMessage *message,
                                         gpointer user_data) {
-    return static_cast<RtspServer *>(user_data)->onMediaHandleMessage(media, message);
+    CallbackGuard guard(user_data);
+    return guard.server() ? guard.server()->onMediaHandleMessage(media, message) : FALSE;
 }
 
 gboolean RtspServer::watchdogTick(gpointer user_data) {
-    return static_cast<RtspServer *>(user_data)->onWatchdog();
+    CallbackGuard guard(user_data);
+    return guard.server() ? guard.server()->onWatchdog() : G_SOURCE_REMOVE;
+}
+
+GstRTSPFilterResult RtspServer::closeClient(GstRTSPServer *,
+                                             GstRTSPClient *client,
+                                             gpointer) {
+    gst_rtsp_client_close(client);
+    return GST_RTSP_FILTER_REMOVE;
+}
+
+RtspServer::MediaHandlers RtspServer::connectMediaHandlers(GstRTSPMedia *media) {
+    MediaHandlers handlers;
+    handlers.prepared = g_signal_connect_data(
+        media, "prepared", G_CALLBACK(RtspServer::mediaPrepared),
+        newCallbackData(callback_state_), RtspServer::destroySignalCallbackData,
+        static_cast<GConnectFlags>(0));
+    handlers.unprepared = g_signal_connect_data(
+        media, "unprepared", G_CALLBACK(RtspServer::mediaUnprepared),
+        newCallbackData(callback_state_), RtspServer::destroySignalCallbackData,
+        static_cast<GConnectFlags>(0));
+    handlers.target_state = g_signal_connect_data(
+        media, "target-state", G_CALLBACK(RtspServer::mediaTargetState),
+        newCallbackData(callback_state_), RtspServer::destroySignalCallbackData,
+        static_cast<GConnectFlags>(0));
+    handlers.new_state = g_signal_connect_data(
+        media, "new-state", G_CALLBACK(RtspServer::mediaNewState),
+        newCallbackData(callback_state_), RtspServer::destroySignalCallbackData,
+        static_cast<GConnectFlags>(0));
+    handlers.handle_message = g_signal_connect_data(
+        media, "handle-message", G_CALLBACK(RtspServer::mediaHandleMessage),
+        newCallbackData(callback_state_), RtspServer::destroySignalCallbackData,
+        static_cast<GConnectFlags>(0));
+    return handlers;
+}
+
+void RtspServer::disconnectMediaHandlers(GstRTSPMedia *media,
+                                         const MediaHandlers &handlers) {
+    if (!media) {
+        return;
+    }
+    for (const gulong handler : {handlers.prepared,
+                                 handlers.unprepared,
+                                 handlers.target_state,
+                                 handlers.new_state,
+                                 handlers.handle_message}) {
+        if (handler != 0 && g_signal_handler_is_connected(media, handler)) {
+            g_signal_handler_disconnect(media, handler);
+        }
+    }
 }
 
 bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
@@ -237,7 +394,7 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
     return accepted;
 }
 
-void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
+void RtspServer::onMediaConfigure(GstRTSPMediaFactory *factory, GstRTSPMedia *media) {
     // The Pi's stateful V4L2 encoder retains imported DMABUFs when the same
     // pipeline is prepared again. Retire it completely after unprepare and
     // install a fresh shared factory instead of reusing encoder state.
@@ -246,15 +403,13 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
     gst_rtsp_media_set_eos_shutdown(media, FALSE);
     gst_rtsp_media_set_suspend_mode(media, GST_RTSP_SUSPEND_MODE_NONE);
 
-    GstRTSPMedia *previous_media = nullptr;
-    GstAppSrc *previous_source = nullptr;
-    bool changed = false;
+    const MediaHandlers handlers = connectMediaHandlers(media);
+    bool accepted = false;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        if (current_media_ != media) {
-            previous_media = current_media_;
-            previous_source = appsrc_;
+        if (running_.load() && current_factory_ == factory && current_media_ == nullptr) {
             current_media_ = static_cast<GstRTSPMedia *>(g_object_ref(media));
+            current_media_handlers_ = handlers;
             appsrc_ = nullptr;
             generation_.fetch_add(1);
             ++media_generation_;
@@ -263,24 +418,15 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
             recovery_reason_.clear();
             observed_status_ = GST_RTSP_MEDIA_STATUS_PREPARING;
             status_since_us_ = g_get_monotonic_time();
-            changed = true;
+            accepted = true;
         }
     }
-    if (previous_source) {
-        gst_object_unref(previous_source);
+    if (!accepted) {
+        disconnectMediaHandlers(media, handlers);
+        std::cout << "[rtsp] ignored stale or concurrent media configuration\n";
+        return;
     }
-    if (previous_media) {
-        g_signal_handlers_disconnect_by_data(previous_media, this);
-        g_object_unref(previous_media);
-    }
-    if (changed) {
-        latest_.clear();
-        g_signal_connect(media, "prepared", G_CALLBACK(RtspServer::mediaPrepared), this);
-        g_signal_connect(media, "unprepared", G_CALLBACK(RtspServer::mediaUnprepared), this);
-        g_signal_connect(media, "target-state", G_CALLBACK(RtspServer::mediaTargetState), this);
-        g_signal_connect(media, "new-state", G_CALLBACK(RtspServer::mediaNewState), this);
-        g_signal_connect(media, "handle-message", G_CALLBACK(RtspServer::mediaHandleMessage), this);
-    }
+    latest_.clear();
     if (!bindMediaSource(media)) {
         std::lock_guard<std::mutex> lock(source_mutex_);
         if (current_media_ == media) {
@@ -313,14 +459,17 @@ void RtspServer::onMediaPrepared(GstRTSPMedia *media) {
 void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
     GstRTSPMedia *retired_media = nullptr;
     GstAppSrc *retired_source = nullptr;
+    MediaHandlers retired_handlers;
     bool recovered_from_error = false;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
         if (current_media_ == media) {
             retired_media = current_media_;
             retired_source = appsrc_;
+            retired_handlers = current_media_handlers_;
             recovered_from_error = recovery_generation_ == media_generation_;
             current_media_ = nullptr;
+            current_media_handlers_ = {};
             appsrc_ = nullptr;
             generation_.fetch_add(1);
             ++media_generation_;
@@ -336,11 +485,14 @@ void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
         return;
     }
     latest_.clear();
-    g_signal_handlers_disconnect_by_data(retired_media, this);
+    disconnectMediaHandlers(retired_media, retired_handlers);
     if (retired_source) {
         gst_object_unref(retired_source);
     }
     g_object_unref(retired_media);
+    if (!running_.load()) {
+        return;
+    }
     if (installFactory()) {
         if (recovered_from_error) {
             metrics_.rtsp_recoveries.fetch_add(1);
@@ -471,6 +623,7 @@ gboolean RtspServer::onWatchdog() {
 bool RtspServer::recoverMedia(std::uint64_t expected_media_generation, const char *reason) {
     GstRTSPMedia *media = nullptr;
     GstAppSrc *source = nullptr;
+    MediaHandlers handlers;
     std::uint64_t actual_media_generation = 0;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
@@ -483,7 +636,9 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation, const cha
         } else {
             media = current_media_;
             source = appsrc_;
+            handlers = current_media_handlers_;
             current_media_ = nullptr;
+            current_media_handlers_ = {};
             appsrc_ = nullptr;
             generation_.fetch_add(1);
             ++media_generation_;
@@ -501,9 +656,7 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation, const cha
     }
     latest_.clear();
 
-    if (media) {
-        g_signal_handlers_disconnect_by_data(media, this);
-    }
+    disconnectMediaHandlers(media, handlers);
     if (source) {
         gst_app_src_end_of_stream(source);
         gst_object_unref(source);
@@ -513,6 +666,9 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation, const cha
         g_object_unref(media);
     }
 
+    if (!running_.load()) {
+        return false;
+    }
     if (!installFactory()) {
         metrics_.rtsp_errors.fetch_add(1);
         std::cerr << "[rtsp] recovery failed to replace media factory\n";
@@ -702,6 +858,12 @@ void RtspServer::feederLoop() {
     }
 }
 
+void RtspServer::disableCallbacksAndWait() {
+    std::unique_lock<std::mutex> lock(callback_state_->mutex);
+    callback_state_->server = nullptr;
+    callback_state_->cv.wait(lock, [this] { return callback_state_->active == 0; });
+}
+
 void RtspServer::stop() {
     if (!running_.exchange(false)) {
         return;
@@ -714,14 +876,34 @@ void RtspServer::stop() {
         g_source_remove(watchdog_id_);
         watchdog_id_ = 0;
     }
+    if (attach_id_ != 0) {
+        g_source_remove(attach_id_);
+        attach_id_ = 0;
+    }
+
+    // Media signals run on GstRTSPThread contexts, not necessarily loop_thread_.
+    // Make every callback drop its independently-owned state reference, then
+    // wait for callbacks that already captured this server to finish before
+    // releasing any GStreamer object or the server itself.
+    disableCallbacksAndWait();
+
     GstAppSrc *source = nullptr;
     GstRTSPMedia *media = nullptr;
+    MediaHandlers media_handlers;
+    GstRTSPMediaFactory *factory = nullptr;
+    gulong factory_handler = 0;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
         source = appsrc_;
         media = current_media_;
+        media_handlers = current_media_handlers_;
+        factory = current_factory_;
+        factory_handler = current_factory_handler_;
         appsrc_ = nullptr;
         current_media_ = nullptr;
+        current_media_handlers_ = {};
+        current_factory_ = nullptr;
+        current_factory_handler_ = 0;
         generation_.fetch_add(1);
         ++media_generation_;
         consecutive_push_failures_ = 0;
@@ -730,11 +912,28 @@ void RtspServer::stop() {
         observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
         status_since_us_ = g_get_monotonic_time();
     }
-    if (media) {
-        g_signal_handlers_disconnect_by_data(media, this);
+
+    disconnectMediaHandlers(media, media_handlers);
+    if (factory && factory_handler != 0 &&
+        g_signal_handler_is_connected(factory, factory_handler)) {
+        g_signal_handler_disconnect(factory, factory_handler);
     }
+    if (mounts_) {
+        gst_rtsp_mount_points_remove_factory(mounts_, config_.rtsp_mount.c_str());
+    }
+    if (server_) {
+        GList *clients = gst_rtsp_server_client_filter(server_, RtspServer::closeClient, nullptr);
+        g_list_free_full(clients, g_object_unref);
+    }
+
     if (source) {
         gst_app_src_end_of_stream(source);
+    }
+    if (media) {
+        gst_rtsp_media_set_pipeline_state(media, GST_STATE_NULL);
+        gst_rtsp_media_unprepare(media);
+    }
+    if (source) {
         gst_object_unref(source);
     }
     if (loop_) {
@@ -743,12 +942,11 @@ void RtspServer::stop() {
     if (loop_thread_.joinable()) {
         loop_thread_.join();
     }
-    if (attach_id_ != 0) {
-        g_source_remove(attach_id_);
-        attach_id_ = 0;
-    }
     if (media) {
         g_object_unref(media);
+    }
+    if (factory) {
+        g_object_unref(factory);
     }
     if (mounts_) {
         g_object_unref(mounts_);
