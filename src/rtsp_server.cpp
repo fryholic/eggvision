@@ -107,8 +107,8 @@ bool RtspServer::start() {
         return false;
     }
 
-    status_since_us_.store(g_get_monotonic_time());
-    last_session_cleanup_us_ = status_since_us_.load();
+    status_since_us_ = g_get_monotonic_time();
+    last_session_cleanup_us_ = status_since_us_;
     watchdog_id_ = g_timeout_add(500, RtspServer::watchdogTick, this);
     feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
     loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
@@ -257,6 +257,12 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
             current_media_ = static_cast<GstRTSPMedia *>(g_object_ref(media));
             appsrc_ = nullptr;
             generation_.fetch_add(1);
+            ++media_generation_;
+            consecutive_push_failures_ = 0;
+            recovery_generation_ = 0;
+            recovery_reason_.clear();
+            observed_status_ = GST_RTSP_MEDIA_STATUS_PREPARING;
+            status_since_us_ = g_get_monotonic_time();
             changed = true;
         }
     }
@@ -274,11 +280,13 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
         g_signal_connect(media, "target-state", G_CALLBACK(RtspServer::mediaTargetState), this);
         g_signal_connect(media, "new-state", G_CALLBACK(RtspServer::mediaNewState), this);
         g_signal_connect(media, "handle-message", G_CALLBACK(RtspServer::mediaHandleMessage), this);
-        observed_status_.store(GST_RTSP_MEDIA_STATUS_PREPARING);
-        status_since_us_.store(g_get_monotonic_time());
     }
     if (!bindMediaSource(media)) {
-        recovery_requested_.store(true);
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if (current_media_ == media) {
+            recovery_generation_ = media_generation_;
+            recovery_reason_ = "media setup failure";
+        }
         return;
     }
     std::cout << "[rtsp] client media configured\n";
@@ -286,24 +294,41 @@ void RtspServer::onMediaConfigure(GstRTSPMedia *media) {
 
 void RtspServer::onMediaPrepared(GstRTSPMedia *media) {
     if (bindMediaSource(media)) {
-        consecutive_push_failures_.store(0);
-        observed_status_.store(GST_RTSP_MEDIA_STATUS_PREPARED);
-        status_since_us_.store(g_get_monotonic_time());
-        std::cout << "[rtsp] client media prepared\n";
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            if (current_media_ == media) {
+                consecutive_push_failures_ = 0;
+                observed_status_ = GST_RTSP_MEDIA_STATUS_PREPARED;
+                status_since_us_ = g_get_monotonic_time();
+                current = true;
+            }
+        }
+        if (current) {
+            std::cout << "[rtsp] client media prepared\n";
+        }
     }
 }
 
 void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
     GstRTSPMedia *retired_media = nullptr;
     GstAppSrc *retired_source = nullptr;
+    bool recovered_from_error = false;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
         if (current_media_ == media) {
             retired_media = current_media_;
             retired_source = appsrc_;
+            recovered_from_error = recovery_generation_ == media_generation_;
             current_media_ = nullptr;
             appsrc_ = nullptr;
             generation_.fetch_add(1);
+            ++media_generation_;
+            consecutive_push_failures_ = 0;
+            recovery_generation_ = 0;
+            recovery_reason_.clear();
+            observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
+            status_since_us_ = g_get_monotonic_time();
         }
     }
     if (!retired_media) {
@@ -311,10 +336,6 @@ void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
         return;
     }
     latest_.clear();
-    consecutive_push_failures_.store(0);
-    const bool recovered_from_error = recovery_requested_.exchange(false);
-    observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
-    status_since_us_.store(g_get_monotonic_time());
     g_signal_handlers_disconnect_by_data(retired_media, this);
     if (retired_source) {
         gst_object_unref(retired_source);
@@ -334,16 +355,15 @@ void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
 }
 
 void RtspServer::onMediaTargetState(GstRTSPMedia *media, GstState state) {
-    bool current = false;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        current = current_media_ == media;
+        if (current_media_ != media || state != GST_STATE_NULL) {
+            return;
+        }
+        observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARING;
+        status_since_us_ = g_get_monotonic_time();
     }
-    if (current && state == GST_STATE_NULL) {
-        observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARING);
-        status_since_us_.store(g_get_monotonic_time());
-        std::cout << "[rtsp] media status=unpreparing\n";
-    }
+    std::cout << "[rtsp] media status=unpreparing\n";
 }
 
 void RtspServer::onMediaNewState(GstRTSPMedia *media, GstState state) {
@@ -358,20 +378,25 @@ gboolean RtspServer::onMediaHandleMessage(GstRTSPMedia *media, GstMessage *messa
         return FALSE;
     }
 
-    bool current = false;
+    bool first_request = false;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        current = current_media_ == media;
+        if (current_media_ != media) {
+            return FALSE;
+        }
+        first_request = recovery_generation_ != media_generation_;
+        recovery_generation_ = media_generation_;
+        recovery_reason_ = "media bus reported an error";
+        observed_status_ = GST_RTSP_MEDIA_STATUS_ERROR;
+        status_since_us_ = g_get_monotonic_time();
     }
-    if (!current || recovery_requested_.exchange(true)) {
+    if (!first_request) {
         return FALSE;
     }
 
     GError *error = nullptr;
     gchar *debug = nullptr;
     gst_message_parse_error(message, &error, &debug);
-    observed_status_.store(GST_RTSP_MEDIA_STATUS_ERROR);
-    status_since_us_.store(g_get_monotonic_time());
     metrics_.rtsp_errors.fetch_add(1);
     std::cerr << "[rtsp] media error: "
               << (error && error->message ? error->message : "unknown error");
@@ -403,54 +428,78 @@ gboolean RtspServer::onWatchdog() {
         last_session_cleanup_us_ = now;
     }
 
-    if (recovery_requested_.exchange(false)) {
-        const char *reason = observed_status_.load() == GST_RTSP_MEDIA_STATUS_ERROR
-                                 ? "media bus reported an error"
-                                 : "repeated appsrc or media setup failure";
-        recoverMedia(reason);
-        return G_SOURCE_CONTINUE;
-    }
-
-    bool has_media = false;
+    std::uint64_t media_generation = 0;
+    std::uint64_t recovery_generation = 0;
+    std::string recovery_reason;
+    GstRTSPMediaStatus status = GST_RTSP_MEDIA_STATUS_UNPREPARED;
+    gint64 status_since_us = now;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        has_media = current_media_ != nullptr;
+        if (current_media_) {
+            media_generation = media_generation_;
+            recovery_generation = recovery_generation_;
+            recovery_reason = recovery_reason_;
+            status = observed_status_;
+            status_since_us = status_since_us_;
+        }
     }
-    if (!has_media) {
-        observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
-        status_since_us_.store(now);
+
+    if (recovery_generation != 0) {
+        recoverMedia(recovery_generation,
+                     recovery_reason.empty() ? "media recovery requested"
+                                             : recovery_reason.c_str());
         return G_SOURCE_CONTINUE;
     }
 
-    const GstRTSPMediaStatus status = observed_status_.load();
-    const gint64 status_age = now - status_since_us_.load();
+    if (media_generation == 0) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    const gint64 status_age = now - status_since_us;
     if (status == GST_RTSP_MEDIA_STATUS_ERROR) {
-        recoverMedia("media entered error state");
+        recoverMedia(media_generation, "media entered error state");
     } else if (status == GST_RTSP_MEDIA_STATUS_UNPREPARING &&
                status_age >= 3 * G_USEC_PER_SEC) {
-        recoverMedia("media remained unpreparing for 3 seconds");
+        recoverMedia(media_generation, "media remained unpreparing for 3 seconds");
     } else if (status == GST_RTSP_MEDIA_STATUS_PREPARING &&
                status_age >= 10 * G_USEC_PER_SEC) {
-        recoverMedia("media remained preparing for 10 seconds");
+        recoverMedia(media_generation, "media remained preparing for 10 seconds");
     }
     return G_SOURCE_CONTINUE;
 }
 
-void RtspServer::recoverMedia(const char *reason) {
+bool RtspServer::recoverMedia(std::uint64_t expected_media_generation, const char *reason) {
     GstRTSPMedia *media = nullptr;
     GstAppSrc *source = nullptr;
+    std::uint64_t actual_media_generation = 0;
     {
         std::lock_guard<std::mutex> lock(source_mutex_);
-        media = current_media_;
-        source = appsrc_;
-        current_media_ = nullptr;
-        appsrc_ = nullptr;
-        generation_.fetch_add(1);
+        actual_media_generation = current_media_ ? media_generation_ : 0;
+        if (!current_media_ || media_generation_ != expected_media_generation) {
+            if (recovery_generation_ == expected_media_generation) {
+                recovery_generation_ = 0;
+                recovery_reason_.clear();
+            }
+        } else {
+            media = current_media_;
+            source = appsrc_;
+            current_media_ = nullptr;
+            appsrc_ = nullptr;
+            generation_.fetch_add(1);
+            ++media_generation_;
+            consecutive_push_failures_ = 0;
+            recovery_generation_ = 0;
+            recovery_reason_.clear();
+            observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
+            status_since_us_ = g_get_monotonic_time();
+        }
+    }
+    if (!media) {
+        std::cout << "[rtsp] ignored stale recovery request generation="
+                  << expected_media_generation << " current=" << actual_media_generation << '\n';
+        return false;
     }
     latest_.clear();
-    consecutive_push_failures_.store(0);
-    observed_status_.store(GST_RTSP_MEDIA_STATUS_UNPREPARED);
-    status_since_us_.store(g_get_monotonic_time());
 
     if (media) {
         g_signal_handlers_disconnect_by_data(media, this);
@@ -467,10 +516,11 @@ void RtspServer::recoverMedia(const char *reason) {
     if (!installFactory()) {
         metrics_.rtsp_errors.fetch_add(1);
         std::cerr << "[rtsp] recovery failed to replace media factory\n";
-        return;
+        return false;
     }
     metrics_.rtsp_recoveries.fetch_add(1);
     std::cerr << "[rtsp] recovered media factory: " << reason << '\n';
+    return true;
 }
 
 GstBuffer *RtspServer::makeBuffer(std::shared_ptr<FrameLease> frame,
@@ -597,9 +647,11 @@ void RtspServer::feederLoop() {
 
         GstAppSrc *source = nullptr;
         std::uint64_t generation = 0;
+        std::uint64_t media_generation = 0;
         {
             std::lock_guard<std::mutex> lock(source_mutex_);
             generation = generation_.load();
+            media_generation = media_generation_;
             if (appsrc_) {
                 source = GST_APP_SRC(gst_object_ref(appsrc_));
             }
@@ -624,16 +676,28 @@ void RtspServer::feederLoop() {
         gst_object_unref(source);
         if (flow == GST_FLOW_OK) {
             metrics_.rtsp_pushed.fetch_add(1);
-            consecutive_push_failures_.store(0);
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            if (current_media_ && media_generation_ == media_generation) {
+                consecutive_push_failures_ = 0;
+            }
         } else if (flow != GST_FLOW_FLUSHING) {
             metrics_.rtsp_errors.fetch_add(1);
-            const unsigned failures = consecutive_push_failures_.fetch_add(1) + 1;
-            if (failures >= 3) {
-                recovery_requested_.store(true);
+            {
+                std::lock_guard<std::mutex> lock(source_mutex_);
+                if (current_media_ && media_generation_ == media_generation) {
+                    ++consecutive_push_failures_;
+                    if (consecutive_push_failures_ >= 3) {
+                        recovery_generation_ = media_generation;
+                        recovery_reason_ = "repeated appsrc push failure";
+                    }
+                }
             }
             std::cerr << "[rtsp] appsrc push failed: " << gst_flow_get_name(flow) << '\n';
         } else {
-            consecutive_push_failures_.store(0);
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            if (current_media_ && media_generation_ == media_generation) {
+                consecutive_push_failures_ = 0;
+            }
         }
     }
 }
@@ -659,6 +723,12 @@ void RtspServer::stop() {
         appsrc_ = nullptr;
         current_media_ = nullptr;
         generation_.fetch_add(1);
+        ++media_generation_;
+        consecutive_push_failures_ = 0;
+        recovery_generation_ = 0;
+        recovery_reason_.clear();
+        observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
+        status_since_us_ = g_get_monotonic_time();
     }
     if (media) {
         g_signal_handlers_disconnect_by_data(media, this);

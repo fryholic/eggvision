@@ -50,7 +50,7 @@ private:
     void onMediaNewState(GstRTSPMedia *media, GstState state);
     gboolean onMediaHandleMessage(GstRTSPMedia *media, GstMessage *message);
     gboolean onWatchdog();
-    void recoverMedia(const char *reason);
+    bool recoverMedia(std::uint64_t expected_media_generation, const char *reason);
     void feederLoop();
     GstBuffer *makeBuffer(std::shared_ptr<FrameLease> frame,
                           std::uint64_t base_timestamp,
@@ -71,10 +71,15 @@ private:
     GstRTSPMedia *current_media_ = nullptr;
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> generation_{0};
-    std::atomic<unsigned> consecutive_push_failures_{0};
-    std::atomic<bool> recovery_requested_{false};
-    std::atomic<GstRTSPMediaStatus> observed_status_{GST_RTSP_MEDIA_STATUS_UNPREPARED};
-    std::atomic<gint64> status_since_us_{0};
+    // The following lifecycle fields are protected by source_mutex_. Keeping
+    // status and recovery intent in the same media generation prevents an old
+    // pipeline callback from retiring a newly configured pipeline.
+    std::uint64_t media_generation_ = 0;
+    unsigned consecutive_push_failures_ = 0;
+    std::uint64_t recovery_generation_ = 0;
+    std::string recovery_reason_;
+    GstRTSPMediaStatus observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
+    gint64 status_since_us_ = 0;
     gint64 last_session_cleanup_us_ = 0;
 };
 
