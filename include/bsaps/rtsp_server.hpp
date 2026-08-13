@@ -35,6 +35,7 @@ public:
 private:
     struct CallbackState;
     struct RecoveryJob;
+    struct RecoveryWorkerState;
     struct SessionCleanupState;
     enum class RecoveryState {
         Idle,
@@ -99,7 +100,10 @@ private:
     void onClientNewSession(GstRTSPSession *session);
     bool startSessionCleanup();
     void requestSessionCleanupStop();
-    bool recoverMedia(std::uint64_t expected_media_generation, const char *reason);
+    bool startRecoveryWorker();
+    void requestRecoveryWorkerStop(bool detach_in_flight);
+    static void recoveryWorkerLoop(const std::shared_ptr<RecoveryWorkerState> &state);
+    bool recoverMedia(std::uint64_t expected_media_generation, const char *reason) noexcept;
     void finishRecoveryIfReady();
     void disableCallbacksAndWait();
     void feederLoop();
@@ -120,6 +124,8 @@ private:
     bool accepting_clients_ = false;
     std::thread loop_thread_;
     std::thread feeder_thread_;
+    std::thread recovery_worker_thread_;
+    std::shared_ptr<RecoveryWorkerState> recovery_worker_state_;
     std::shared_ptr<SessionCleanupState> session_cleanup_state_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
     mutable std::mutex source_mutex_;
@@ -155,6 +161,8 @@ private:
     bool test_recovery_pause_reported_ = false;
     unsigned test_session_timeout_seconds_ = 0;
     unsigned test_session_cleanup_delay_ms_ = 0;
+    bool test_fail_recovery_thread_create_ = false;
+    bool test_fail_cleanup_thread_create_ = false;
 #endif
 };
 

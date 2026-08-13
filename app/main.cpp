@@ -137,6 +137,13 @@ int main(int argc, char **argv) {
             camera.stop();
             inference.stop();
             rtsp.stop();
+            std::cout << "[app] startup failed outstanding="
+                      << metrics.outstanding_leases.load()
+                      << " capture_errors=" << metrics.capture_errors.load()
+                      << " rtsp_errors=" << metrics.rtsp_errors.load()
+                      << " rtsp_recoveries=" << metrics.rtsp_recoveries.load()
+                      << " rtsp_recovery_failures="
+                      << metrics.rtsp_recovery_failures.load() << '\n';
             return 3;
         }
 

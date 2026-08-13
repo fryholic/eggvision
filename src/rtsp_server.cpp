@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 #include <unistd.h>
 
 #include <gst/allocators/gstdmabuf.h>
@@ -38,6 +39,18 @@ struct RtspServer::RecoveryJob {
     std::condition_variable cv;
     std::atomic<bool> done{false};
     std::uint64_t token = 0;
+    GstRTSPServer *server = nullptr;
+    GstRTSPSessionPool *pool = nullptr;
+    GstRTSPMediaFactory *factory = nullptr;
+    GstAppSrc *source = nullptr;
+    unsigned teardown_delay_ms = 0;
+};
+
+struct RtspServer::RecoveryWorkerState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::shared_ptr<RecoveryJob> pending;
+    bool stopping = false;
 };
 
 struct RtspServer::SessionCleanupState {
@@ -126,6 +139,10 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
         parse_test_unsigned("BSAPS_RTSP_TEST_SESSION_TIMEOUT_SECONDS");
     test_session_cleanup_delay_ms_ =
         parse_test_unsigned("BSAPS_RTSP_TEST_SESSION_CLEANUP_DELAY_MS");
+    test_fail_recovery_thread_create_ =
+        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE"), "1") == 0;
+    test_fail_cleanup_thread_create_ =
+        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE"), "1") == 0;
 #endif
     gst_init(nullptr, nullptr);
 }
@@ -218,32 +235,19 @@ bool RtspServer::start() {
         return false;
     }
 
+    // Create the only recovery teardown worker before exposing the listener.
+    // recoverMedia() runs behind a C callback and must never need to create a
+    // thread after it has published Running state or transferred GObject refs.
+    if (!startRecoveryWorker()) {
+        std::cerr << "[rtsp] failed to start recovery teardown worker\n";
+        stop();
+        return false;
+    }
+
     const guint initial_attach_id = gst_rtsp_server_attach(server_, nullptr);
     if (initial_attach_id == 0) {
         std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':' << config_.rtsp_port << '\n';
-        running_.store(false);
-        GstRTSPMediaFactory *factory = nullptr;
-        gulong factory_handler = 0;
-        {
-            std::lock_guard<std::mutex> lock(source_mutex_);
-            factory = current_factory_;
-            factory_handler = current_factory_handler_;
-            current_factory_ = nullptr;
-            current_factory_handler_ = 0;
-        }
-        if (factory) {
-            if (factory_handler != 0) {
-                g_signal_handler_disconnect(factory, factory_handler);
-            }
-            gst_rtsp_mount_points_remove_factory(mounts_, config_.rtsp_mount.c_str());
-            g_object_unref(factory);
-        }
-        g_object_unref(mounts_);
-        mounts_ = nullptr;
-        g_object_unref(server_);
-        server_ = nullptr;
-        g_main_loop_unref(loop_);
-        loop_ = nullptr;
+        stop();
         return false;
     }
     {
@@ -264,8 +268,15 @@ bool RtspServer::start() {
                                       RtspServer::watchdogTick,
                                       newCallbackData(callback_state_),
                                       RtspServer::destroySourceCallbackData);
-    feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
-    loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
+    try {
+        feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
+        loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
+    } catch (const std::system_error &error) {
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] failed to start owner thread: " << error.what() << '\n';
+        stop();
+        return false;
+    }
     std::cout << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
               << config_.rtsp_mount << " (H264 High@L4, DMABUF import)\n";
     return true;
@@ -478,19 +489,154 @@ bool RtspServer::startSessionCleanup() {
         g_object_unref(state->pool);
         return false;
     }
+    std::thread owner;
+    try {
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+        if (test_fail_cleanup_thread_create_) {
+            throw std::system_error(
+                std::make_error_code(std::errc::resource_unavailable_try_again),
+                "test hook cleanup thread creation failure");
+        }
+#endif
+        owner = std::thread([state] {
+            g_main_loop_run(state->loop);
+            // The cleanup owner is independent of RtspServer. It may finish a
+            // slow session-removed/unprepare after application stop without
+            // touching the server or Metrics, then releases its own refs.
+            g_source_unref(state->source);
+            g_main_loop_unref(state->loop);
+            g_main_context_unref(state->context);
+            g_object_unref(state->pool);
+        });
+        owner.detach();
+    } catch (const std::system_error &error) {
+        // If creation failed there is no owner. If detach itself failed, stop
+        // and join the local owner before releasing its external state.
+        state->stopping.store(true, std::memory_order_release);
+        g_source_destroy(state->source);
+        g_main_loop_quit(state->loop);
+        g_main_context_wakeup(state->context);
+        if (owner.joinable()) {
+            owner.join();
+        } else {
+            g_source_unref(state->source);
+            g_main_loop_unref(state->loop);
+            g_main_context_unref(state->context);
+            g_object_unref(state->pool);
+        }
+        metrics_.rtsp_errors.fetch_add(1);
+        std::cerr << "[rtsp] session cleanup thread creation failed: "
+                  << error.what() << '\n';
+        return false;
+    }
     session_cleanup_state_ = state;
-    std::thread([state] {
-        g_main_loop_run(state->loop);
-        // The cleanup owner is independent of RtspServer. It may finish a slow
-        // session-removed/unprepare after application stop without touching the
-        // server or Metrics, then releases its own source/context/pool refs.
-        g_source_unref(state->source);
-        g_main_loop_unref(state->loop);
-        g_main_context_unref(state->context);
-        g_object_unref(state->pool);
-    }).detach();
     std::cout << "[rtsp] session pool cleanup ready max=" << state->max_sessions << '\n';
     return true;
+}
+
+bool RtspServer::startRecoveryWorker() {
+    try {
+        auto state = std::make_shared<RecoveryWorkerState>();
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+        if (test_fail_recovery_thread_create_) {
+            throw std::system_error(
+                std::make_error_code(std::errc::resource_unavailable_try_again),
+                "test hook recovery thread creation failure");
+        }
+#endif
+        std::thread worker([state] { RtspServer::recoveryWorkerLoop(state); });
+        recovery_worker_state_ = std::move(state);
+        recovery_worker_thread_ = std::move(worker);
+        return true;
+    } catch (const std::system_error &error) {
+        metrics_.rtsp_errors.fetch_add(1);
+        metrics_.rtsp_recovery_failures.fetch_add(1);
+        std::cerr << "[rtsp] recovery thread creation failed: " << error.what() << '\n';
+        return false;
+    } catch (const std::bad_alloc &error) {
+        metrics_.rtsp_errors.fetch_add(1);
+        metrics_.rtsp_recovery_failures.fetch_add(1);
+        std::cerr << "[rtsp] recovery worker allocation failed: " << error.what() << '\n';
+        return false;
+    }
+}
+
+void RtspServer::recoveryWorkerLoop(
+    const std::shared_ptr<RecoveryWorkerState> &state) {
+    while (true) {
+        std::shared_ptr<RecoveryJob> job;
+        {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            state->cv.wait(lock, [&state] { return state->stopping || state->pending; });
+            if (!state->pending) {
+                if (state->stopping) {
+                    return;
+                }
+                continue;
+            }
+            job = std::move(state->pending);
+        }
+
+        if (job->teardown_delay_ms != 0) {
+            g_usleep(static_cast<gulong>(job->teardown_delay_ms) * 1000);
+        }
+        if (job->source) {
+            gst_app_src_end_of_stream(job->source);
+            gst_object_unref(job->source);
+            job->source = nullptr;
+        }
+        if (job->server) {
+            GList *clients = gst_rtsp_server_client_filter(
+                job->server, RtspServer::closeClient, nullptr);
+            g_list_free_full(clients, g_object_unref);
+        }
+        if (job->pool) {
+            GList *sessions = gst_rtsp_session_pool_filter(
+                job->pool, RtspServer::removeSession, nullptr);
+            g_list_free_full(sessions, g_object_unref);
+            g_object_unref(job->pool);
+            job->pool = nullptr;
+        }
+        if (job->server) {
+            g_object_unref(job->server);
+            job->server = nullptr;
+        }
+        if (job->factory) {
+            g_object_unref(job->factory);
+            job->factory = nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> lock(job->mutex);
+            job->done.store(true, std::memory_order_release);
+        }
+        job->cv.notify_all();
+    }
+}
+
+void RtspServer::requestRecoveryWorkerStop(bool detach_in_flight) {
+    std::shared_ptr<RecoveryWorkerState> state;
+    {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        state = std::move(recovery_worker_state_);
+    }
+    if (state) {
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->stopping = true;
+        }
+        state->cv.notify_all();
+    }
+    if (!recovery_worker_thread_.joinable()) {
+        return;
+    }
+    // The worker owns only RecoveryWorkerState/RecoveryJob and GObject refs.
+    // After the existing bounded deadline it is safe to detach a wedged job;
+    // normal startup/shutdown always joins the persistent owner.
+    if (detach_in_flight) {
+        recovery_worker_thread_.detach();
+    } else {
+        recovery_worker_thread_.join();
+    }
 }
 
 void RtspServer::requestSessionCleanupStop() {
@@ -924,112 +1070,128 @@ gboolean RtspServer::onWatchdog() {
     return G_SOURCE_CONTINUE;
 }
 
-bool RtspServer::recoverMedia(std::uint64_t expected_media_generation, const char *reason) {
-    GstAppSrc *source = nullptr;
+bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
+                              const char *reason) noexcept {
     std::uint64_t actual_media_generation = 0;
     guint listener_source = 0;
     bool begin_recovery = false;
-    std::shared_ptr<RecoveryJob> job;
-    GstRTSPServer *worker_server = nullptr;
-    GstRTSPSessionPool *worker_pool = nullptr;
-    GstRTSPMediaFactory *worker_factory = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(source_mutex_);
-        actual_media_generation = current_media_ ? media_generation_ : 0;
-        if (!running_.load() || !current_media_ ||
-            media_generation_ != expected_media_generation) {
+    try {
+        // Every throwing C++ allocation happens before any lifecycle field or
+        // GObject ownership is changed. From the Running publication through
+        // queue insertion, shared_ptr moves and GObject refs are non-throwing.
+        auto job = std::make_shared<RecoveryJob>();
+        std::string prepared_reason(reason ? reason : "media recovery requested");
+        std::shared_ptr<RecoveryWorkerState> worker_state;
+        {
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            actual_media_generation = current_media_ ? media_generation_ : 0;
+            if (!running_.load() || !current_media_ ||
+                media_generation_ != expected_media_generation) {
+                if (recovery_state_ == RecoveryState::Requested &&
+                    recovery_generation_ == expected_media_generation) {
+                    recovery_state_ = RecoveryState::Idle;
+                    recovery_generation_ = 0;
+                    recovery_token_ = 0;
+                    recovery_reason_.clear();
+                }
+            } else if (recovery_state_ == RecoveryState::Requested ||
+                       recovery_state_ == RecoveryState::Idle) {
+                worker_state = recovery_worker_state_;
+                if (!worker_state) {
+                    throw std::runtime_error("recovery worker is unavailable");
+                }
+                std::lock_guard<std::mutex> worker_lock(worker_state->mutex);
+                if (worker_state->stopping || worker_state->pending) {
+                    throw std::runtime_error("recovery worker cannot accept a job");
+                }
+
+                job->source = appsrc_;
+                appsrc_ = nullptr;
+                generation_.fetch_add(1);
+                consecutive_push_failures_ = 0;
+                recovery_state_ = RecoveryState::Running;
+                recovery_generation_ = expected_media_generation;
+                if (recovery_token_ == 0) {
+                    recovery_token_ = ++next_recovery_token_;
+                }
+                recovery_reason_ = std::move(prepared_reason);
+                recovery_started_us_ = g_get_monotonic_time();
+                recovery_failure_reported_ = false;
+                recovery_media_unprepared_ = false;
+                job->token = recovery_token_;
+                job->server = server_ ? GST_RTSP_SERVER(g_object_ref(server_)) : nullptr;
+                job->pool = server_ ? gst_rtsp_server_get_session_pool(server_) : nullptr;
+                job->factory = current_factory_
+                                   ? GST_RTSP_MEDIA_FACTORY(g_object_ref(current_factory_))
+                                   : nullptr;
+#ifdef BSAPS_ENABLE_TEST_HOOKS
+                job->teardown_delay_ms = test_teardown_delay_ms_;
+#endif
+                recovery_job_ = job;
+                status_since_us_ = g_get_monotonic_time();
+                listener_source = attach_id_;
+                attach_id_ = 0;
+                accepting_clients_ = false;
+                worker_state->pending = std::move(job);
+                begin_recovery = true;
+            }
+        }
+        if (!begin_recovery) {
+            if (actual_media_generation == expected_media_generation) {
+                return false;
+            }
+            std::cout << "[rtsp] ignored stale recovery request generation="
+                      << expected_media_generation << " current="
+                      << actual_media_generation << '\n';
+            return false;
+        }
+
+        // Removing the listener and waking the pre-existing owner cannot throw
+        // a C++ exception. The job already owns all teardown refs if stop wins
+        // this boundary.
+        latest_.clear();
+        if (listener_source != 0) {
+            g_source_remove(listener_source);
+        }
+        worker_state->cv.notify_one();
+        std::cerr << "[rtsp] recovery teardown started: "
+                  << (reason ? reason : "media recovery requested") << '\n';
+        return true;
+    } catch (const std::exception &error) {
+        bool report_failure = true;
+        try {
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            // Allocation/dispatch failures occur before Running is published.
+            // Leave the current appsrc and listener intact and make the request
+            // retryable instead of stranding a video-less generation.
             if (recovery_state_ == RecoveryState::Requested &&
                 recovery_generation_ == expected_media_generation) {
                 recovery_state_ = RecoveryState::Idle;
                 recovery_generation_ = 0;
                 recovery_token_ = 0;
                 recovery_reason_.clear();
+            } else if (recovery_state_ == RecoveryState::Running) {
+                // This branch is defensive: the publish and queue operation is
+                // non-throwing and atomic under the two owner mutexes.
+                report_failure = !recovery_failure_reported_;
+                recovery_failure_reported_ = true;
             }
-        } else if (recovery_state_ == RecoveryState::Requested ||
-                   recovery_state_ == RecoveryState::Idle) {
-            source = appsrc_;
-            appsrc_ = nullptr;
-            generation_.fetch_add(1);
-            consecutive_push_failures_ = 0;
-            recovery_state_ = RecoveryState::Running;
-            recovery_generation_ = expected_media_generation;
-            if (recovery_token_ == 0) {
-                recovery_token_ = ++next_recovery_token_;
-            }
-            recovery_reason_ = reason;
-            recovery_started_us_ = g_get_monotonic_time();
-            recovery_failure_reported_ = false;
-            recovery_media_unprepared_ = false;
-            job = std::make_shared<RecoveryJob>();
-            job->token = recovery_token_;
-            recovery_job_ = job;
-            status_since_us_ = g_get_monotonic_time();
-            listener_source = attach_id_;
-            attach_id_ = 0;
-            accepting_clients_ = false;
-            worker_server = server_ ? GST_RTSP_SERVER(g_object_ref(server_)) : nullptr;
-            worker_pool = server_ ? gst_rtsp_server_get_session_pool(server_) : nullptr;
-            worker_factory = current_factory_
-                                 ? GST_RTSP_MEDIA_FACTORY(g_object_ref(current_factory_))
-                                 : nullptr;
-            begin_recovery = true;
+        } catch (...) {
+            // noexcept is the final C callback boundary. Atomic metrics below
+            // still record the failure if even mutex acquisition is exhausted.
         }
-    }
-    if (!begin_recovery) {
-        if (actual_media_generation == expected_media_generation) {
-            return false;
+        if (report_failure) {
+            metrics_.rtsp_errors.fetch_add(1);
+            metrics_.rtsp_recovery_failures.fetch_add(1);
         }
-        std::cout << "[rtsp] ignored stale recovery request generation="
-                  << expected_media_generation << " current=" << actual_media_generation << '\n';
+        std::cerr << "[rtsp] recovery dispatch failed safely: " << error.what() << '\n';
+        return false;
+    } catch (...) {
+        metrics_.rtsp_errors.fetch_add(1);
+        metrics_.rtsp_recovery_failures.fetch_add(1);
+        std::cerr << "[rtsp] recovery dispatch failed safely: unknown exception\n";
         return false;
     }
-    latest_.clear();
-    if (listener_source != 0) {
-        g_source_remove(listener_source);
-    }
-    // Client close and the final session unref can synchronously wait for a
-    // streaming pipeline to reach NULL. Run that work outside the RTSP owner
-    // context so its watchdog can enforce the deadline. The job owns every
-    // GObject it touches and never dereferences RtspServer, which also makes a
-    // late completion after stop safe.
-#ifdef BSAPS_ENABLE_TEST_HOOKS
-    const unsigned teardown_delay_ms = test_teardown_delay_ms_;
-#else
-    constexpr unsigned teardown_delay_ms = 0;
-#endif
-    std::thread([job, worker_server, worker_pool, worker_factory, source, teardown_delay_ms] {
-        if (teardown_delay_ms != 0) {
-            g_usleep(static_cast<gulong>(teardown_delay_ms) * 1000);
-        }
-        if (source) {
-            gst_app_src_end_of_stream(source);
-            gst_object_unref(source);
-        }
-        if (worker_server) {
-            GList *clients = gst_rtsp_server_client_filter(
-                worker_server, RtspServer::closeClient, nullptr);
-            g_list_free_full(clients, g_object_unref);
-        }
-        if (worker_pool) {
-            GList *sessions = gst_rtsp_session_pool_filter(
-                worker_pool, RtspServer::removeSession, nullptr);
-            g_list_free_full(sessions, g_object_unref);
-            g_object_unref(worker_pool);
-        }
-        if (worker_server) {
-            g_object_unref(worker_server);
-        }
-        if (worker_factory) {
-            g_object_unref(worker_factory);
-        }
-        {
-            std::lock_guard<std::mutex> lock(job->mutex);
-            job->done.store(true, std::memory_order_release);
-        }
-        job->cv.notify_all();
-    }).detach();
-    std::cerr << "[rtsp] recovery teardown started: " << reason << '\n';
-    return true;
 }
 
 void RtspServer::finishRecoveryIfReady() {
@@ -1397,6 +1559,12 @@ void RtspServer::stop() {
             std::cerr << "[rtsp] stop failed: recovery teardown exceeded 15 seconds\n";
         }
     }
+
+    // No new job can be published after running_=false. Normally the
+    // persistent owner is joined. Only a job that exceeded the existing
+    // bounded stop deadline is detached; its shared state and GObject refs are
+    // independent of RtspServer and remain valid until that job returns.
+    requestRecoveryWorkerStop(recovery_teardown_in_flight);
 
     if (server_ && client_connected_handler_ != 0 &&
         g_signal_handler_is_connected(server_, client_connected_handler_)) {
