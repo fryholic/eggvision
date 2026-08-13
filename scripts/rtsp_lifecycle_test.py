@@ -54,20 +54,41 @@ class RtspConnection:
                 raise ConnectionError("RTSP connection closed by server")
             self.buffer.extend(chunk)
 
-    def _discard_interleaved(self) -> int:
+    def _read_interleaved(self) -> tuple[int, bytes]:
         self._fill(4)
         if self.buffer[0] != ord("$"):
-            return 0
+            raise RuntimeError("buffer does not begin with an interleaved frame")
+        channel = self.buffer[1]
         payload_size = int.from_bytes(self.buffer[2:4], "big")
         self._fill(4 + payload_size)
+        payload = bytes(self.buffer[4 : 4 + payload_size])
         del self.buffer[: 4 + payload_size]
-        return payload_size
+        return channel, payload
+
+    @staticmethod
+    def _rtp_identity(payload: bytes) -> tuple[int, int] | None:
+        if len(payload) < 12 or payload[0] >> 6 != 2:
+            return None
+        csrc_count = payload[0] & 0x0F
+        header_size = 12 + csrc_count * 4
+        if payload[0] & 0x10:
+            if len(payload) < header_size + 4:
+                return None
+            extension_words = int.from_bytes(
+                payload[header_size + 2 : header_size + 4], "big"
+            )
+            header_size += 4 + extension_words * 4
+        if len(payload) <= header_size or payload[1] & 0x7F != 96:
+            return None
+        sequence = int.from_bytes(payload[2:4], "big")
+        ssrc = int.from_bytes(payload[8:12], "big")
+        return sequence, ssrc
 
     def _read_response(self) -> Response:
         while True:
             self._fill()
             if self.buffer[0] == ord("$"):
-                self._discard_interleaved()
+                self._read_interleaved()
                 continue
             break
 
@@ -162,13 +183,26 @@ class RtspConnection:
 
     def wait_for_rtp(self) -> None:
         deadline = time.monotonic() + self.timeout
+        previous: tuple[int, int] | None = None
         while time.monotonic() < deadline:
             self._fill()
-            if self.buffer[0] == ord("$") and self._discard_interleaved() > 0:
-                return
+            if self.buffer[0] == ord("$"):
+                channel, payload = self._read_interleaved()
+                if channel != 0:
+                    continue
+                current = self._rtp_identity(payload)
+                if current is None:
+                    continue
+                if previous is not None:
+                    sequence, ssrc = current
+                    previous_sequence, previous_ssrc = previous
+                    if ssrc == previous_ssrc and sequence == (previous_sequence + 1) & 0xFFFF:
+                        return
+                previous = current
+                continue
             if self.buffer.startswith(b"RTSP/1.0"):
                 self._read_response()
-        raise TimeoutError("no interleaved RTP packet received")
+        raise TimeoutError("no consecutive H.264 RTP packets received on channel 0")
 
     def teardown(self) -> None:
         self.require(self.request("TEARDOWN"), {200}, "TEARDOWN")

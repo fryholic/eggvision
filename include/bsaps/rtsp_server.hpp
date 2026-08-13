@@ -35,14 +35,20 @@ private:
     static void mediaConfigure(GstRTSPMediaFactory *, GstRTSPMedia *media, gpointer user_data);
     static void mediaPrepared(GstRTSPMedia *media, gpointer user_data);
     static void mediaUnprepared(GstRTSPMedia *media, gpointer user_data);
+    static void mediaTargetState(GstRTSPMedia *media, GstState state, gpointer user_data);
     static void mediaNewState(GstRTSPMedia *media, GstState state, gpointer user_data);
+    static gboolean mediaHandleMessage(GstRTSPMedia *media,
+                                       GstMessage *message,
+                                       gpointer user_data);
     static gboolean watchdogTick(gpointer user_data);
     bool installFactory();
     bool bindMediaSource(GstRTSPMedia *media);
     void onMediaConfigure(GstRTSPMedia *media);
     void onMediaPrepared(GstRTSPMedia *media);
     void onMediaUnprepared(GstRTSPMedia *media);
+    void onMediaTargetState(GstRTSPMedia *media, GstState state);
     void onMediaNewState(GstRTSPMedia *media, GstState state);
+    gboolean onMediaHandleMessage(GstRTSPMedia *media, GstMessage *message);
     gboolean onWatchdog();
     void recoverMedia(const char *reason);
     void feederLoop();
