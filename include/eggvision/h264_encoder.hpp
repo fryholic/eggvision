@@ -40,10 +40,12 @@ public:
     void submit(std::shared_ptr<FrameLease> frame);
     void stop();
     bool waitForIndependentFrame(std::chrono::milliseconds timeout);
+    bool recoveryRequested() const { return recovery_requested_.load(); }
 
 private:
     void inputLoop();
     void outputLoop();
+    void busLoop();
     void releasePipeline();
     GstBuffer *makeRawBuffer(std::shared_ptr<FrameLease> frame,
                              std::uint64_t base_sensor_timestamp_ns,
@@ -60,10 +62,15 @@ private:
     GstAppSink *appsink_ = nullptr;
     std::thread input_thread_;
     std::thread output_thread_;
+    std::thread bus_thread_;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> generation_{0};
     std::atomic<std::uint64_t> base_sensor_timestamp_ns_{0};
+    std::atomic<bool> recovery_requested_{false};
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+    std::atomic<bool> test_failure_injected_{false};
+#endif
     std::mutex ready_mutex_;
     std::condition_variable ready_cv_;
     bool independent_frame_seen_ = false;

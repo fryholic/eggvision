@@ -290,8 +290,23 @@ int main(int argc, char **argv) {
         std::uint64_t last_capture = 0;
         std::uint64_t last_rtsp = 0;
         std::uint64_t last_inference = 0;
+        bool fatal_encoder_failure = false;
         while (!exit_requested.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (encoder.recoveryRequested()) {
+                std::cout << "{\"type\":\"encoder_recovery_started\"}\n";
+                encoder.stop();
+                encoded_history.clear();
+                if (!encoder.initialize() || !encoder.start() ||
+                    !encoder.waitForIndependentFrame(std::chrono::seconds(5))) {
+                    metrics.encoder_recovery_failures.fetch_add(1);
+                    std::cerr << "{\"type\":\"encoder_recovery_failed\"}\n";
+                    fatal_encoder_failure = true;
+                    break;
+                }
+                metrics.encoder_recoveries.fetch_add(1);
+                std::cout << "{\"type\":\"encoder_recovered\"}\n";
+            }
             const auto now = std::chrono::steady_clock::now();
             if (config.duration_seconds > 0 &&
                 now - started >= std::chrono::seconds(config.duration_seconds)) {
@@ -321,6 +336,10 @@ int main(int argc, char **argv) {
                       << metrics.encoder_output_bytes.load()
                       << ",\"encoder_dropped\":" << metrics.encoder_dropped.load()
                       << ",\"encoder_errors\":" << metrics.encoder_errors.load()
+                      << ",\"encoder_recoveries\":"
+                      << metrics.encoder_recoveries.load()
+                      << ",\"encoder_recovery_failures\":"
+                      << metrics.encoder_recovery_failures.load()
                       << ",\"rtsp_dropped\":" << metrics.rtsp_dropped.load()
                       << ",\"inference_dropped\":" << metrics.inference_dropped.load()
                       << ",\"capture_errors\":" << metrics.capture_errors.load()
@@ -372,6 +391,9 @@ int main(int argc, char **argv) {
                   << " outstanding=" << metrics.outstanding_leases.load()
                   << " capture_errors=" << metrics.capture_errors.load()
                   << " encoder_errors=" << metrics.encoder_errors.load()
+                  << " encoder_recoveries=" << metrics.encoder_recoveries.load()
+                  << " encoder_recovery_failures="
+                  << metrics.encoder_recovery_failures.load()
                   << " rtsp_errors=" << metrics.rtsp_errors.load()
                   << " rtsp_recoveries=" << metrics.rtsp_recoveries.load()
                   << " rtsp_recovery_failures="
@@ -383,6 +405,9 @@ int main(int argc, char **argv) {
                   << " events_completed=" << metrics.events_completed.load()
                   << " events_failed=" << metrics.events_failed.load()
                   << '\n';
+        if (fatal_encoder_failure) {
+            return 5;
+        }
         return metrics.outstanding_leases.load() == 0 ? 0 : 4;
     } catch (const std::exception &error) {
         std::cerr << "[fatal] " << error.what() << '\n';

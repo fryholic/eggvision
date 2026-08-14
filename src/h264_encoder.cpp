@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <system_error>
@@ -116,6 +117,7 @@ bool H264Encoder::start() {
 
     latest_.reopen();
     base_sensor_timestamp_ns_.store(0);
+    recovery_requested_.store(false);
     generation_.fetch_add(1);
     {
         std::lock_guard<std::mutex> ready_lock(ready_mutex_);
@@ -131,6 +133,7 @@ bool H264Encoder::start() {
     try {
         input_thread_ = std::thread(&H264Encoder::inputLoop, this);
         output_thread_ = std::thread(&H264Encoder::outputLoop, this);
+        bus_thread_ = std::thread(&H264Encoder::busLoop, this);
     } catch (const std::system_error &error) {
         std::cerr << "[encoder] failed to start worker: " << error.what() << '\n';
         metrics_.encoder_errors.fetch_add(1);
@@ -138,6 +141,12 @@ bool H264Encoder::start() {
         latest_.close();
         if (input_thread_.joinable()) {
             input_thread_.join();
+        }
+        if (output_thread_.joinable()) {
+            output_thread_.join();
+        }
+        if (bus_thread_.joinable()) {
+            bus_thread_.join();
         }
         gst_element_set_state(pipeline_, GST_STATE_NULL);
         return false;
@@ -361,23 +370,74 @@ void H264Encoder::outputLoop() {
                 std::cerr << "[encoder] consumer failed: " << error.what() << '\n';
             }
         }
+
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+        if (!test_failure_injected_.load()) {
+            const char *value = std::getenv("EGGVISION_ENCODER_TEST_FAIL_AFTER_AU");
+            const std::uint64_t threshold = value ? std::strtoull(value, nullptr, 10) : 0;
+            if (threshold > 0 && metrics_.encoder_access_units.load() >= threshold &&
+                !test_failure_injected_.exchange(true)) {
+                GError *error = g_error_new_literal(g_quark_from_static_string("eggvision-test"),
+                                                    1,
+                                                    "injected encoder failure");
+                GstMessage *message =
+                    gst_message_new_error(GST_OBJECT(pipeline_), error, "test hook");
+                g_error_free(error);
+                gst_element_post_message(pipeline_, message);
+            }
+        }
+#endif
     }
+}
+
+void H264Encoder::busLoop() {
+    GstBus *bus = gst_element_get_bus(pipeline_);
+    while (running_.load()) {
+        GstMessage *message = gst_bus_timed_pop_filtered(
+            bus,
+            100 * GST_MSECOND,
+            static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+        if (!message) {
+            continue;
+        }
+        if (running_.load()) {
+            if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+                GError *error = nullptr;
+                gchar *debug = nullptr;
+                gst_message_parse_error(message, &error, &debug);
+                std::cerr << "[encoder] pipeline error; recovery requested: "
+                          << (error && error->message ? error->message : "unknown") << '\n';
+                g_clear_error(&error);
+                g_free(debug);
+            } else {
+                std::cerr << "[encoder] unexpected EOS; recovery requested\n";
+            }
+            metrics_.encoder_errors.fetch_add(1);
+            recovery_requested_.store(true);
+            running_.store(false);
+            latest_.close();
+            ready_cv_.notify_all();
+        }
+        gst_message_unref(message);
+    }
+    gst_object_unref(bus);
 }
 
 void H264Encoder::stop() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     const bool was_running = running_.exchange(false);
-    if (was_running) {
-        latest_.close();
-        if (input_thread_.joinable()) {
-            input_thread_.join();
-        }
-        if (appsrc_) {
-            gst_app_src_end_of_stream(appsrc_);
-        }
-        if (output_thread_.joinable()) {
-            output_thread_.join();
-        }
+    latest_.close();
+    if (input_thread_.joinable()) {
+        input_thread_.join();
+    }
+    if (appsrc_ && was_running) {
+        gst_app_src_end_of_stream(appsrc_);
+    }
+    if (output_thread_.joinable()) {
+        output_thread_.join();
+    }
+    if (bus_thread_.joinable()) {
+        bus_thread_.join();
     }
     {
         std::lock_guard<std::mutex> ready_lock(ready_mutex_);
