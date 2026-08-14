@@ -25,6 +25,7 @@ find_package(Threads REQUIRED)
 
 add_library(eggvision_core
     src/camera_capture.cpp
+    src/encoded_ring_buffer.cpp
     src/inference.cpp
     src/rtsp_server.cpp)
 
@@ -57,6 +58,10 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_tests tests/test_core.cpp)
     target_link_libraries(eggvision_tests PRIVATE eggvision_core)
     add_test(NAME eggvision_core_tests COMMAND eggvision_tests)
+
+    add_executable(eggvision_event_core_tests tests/event_core_test.cpp)
+    target_link_libraries(eggvision_event_core_tests PRIVATE eggvision_core)
+    add_test(NAME eggvision_event_core_tests COMMAND eggvision_event_core_tests)
 
     add_executable(eggvision_model_smoke tests/model_smoke.cpp)
     target_link_libraries(eggvision_model_smoke PRIVATE openvino::runtime Threads::Threads)
