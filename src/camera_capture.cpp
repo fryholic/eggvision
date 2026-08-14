@@ -1,4 +1,4 @@
-#include "bsaps/camera_capture.hpp"
+#include "eggvision/camera_capture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,7 +12,7 @@
 #include <libcamera/formats.h>
 #include <libcamera/property_ids.h>
 
-namespace bsaps {
+namespace eggvision {
 
 CameraCapture::CameraCapture(const AppConfig &config, Metrics &metrics)
     : config_values_(config), metrics_(metrics), recycler_(std::make_shared<RecyclerState>()) {}
@@ -373,4 +373,4 @@ void CameraCapture::unmapBuffers() {
     lores_mappings_.clear();
 }
 
-}  // namespace bsaps
+}  // namespace eggvision

@@ -34,7 +34,7 @@ def setup_only(url: str, timeout: float) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--max-sessions", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=10.0)
@@ -43,12 +43,12 @@ def main() -> int:
     if not app.is_file() or args.max_sessions < 2 or args.timeout <= 0:
         parser.error("valid app, max-sessions >= 2, and timeout are required")
 
-    with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-session-cleanup-") as directory:
+    with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-session-cleanup-") as directory:
         root = Path(directory)
         log_path = root / "server.log"
         environment = os.environ.copy()
-        environment["BSAPS_RTSP_TEST_SESSION_TIMEOUT_SECONDS"] = "4"
-        environment["BSAPS_RTSP_TEST_SESSION_CLEANUP_DELAY_MS"] = "2000"
+        environment["EGGVISION_RTSP_TEST_SESSION_TIMEOUT_SECONDS"] = "4"
+        environment["EGGVISION_RTSP_TEST_SESSION_CLEANUP_DELAY_MS"] = "2000"
         environment["G_DEBUG"] = "fatal-criticals"
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(

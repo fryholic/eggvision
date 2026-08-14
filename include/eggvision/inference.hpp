@@ -1,9 +1,9 @@
 #pragma once
 
-#include "bsaps/config.hpp"
-#include "bsaps/frame.hpp"
-#include "bsaps/latest_frame_queue.hpp"
-#include "bsaps/metrics.hpp"
+#include "eggvision/config.hpp"
+#include "eggvision/frame.hpp"
+#include "eggvision/latest_frame_queue.hpp"
+#include "eggvision/metrics.hpp"
 
 #include <atomic>
 #include <memory>
@@ -14,7 +14,7 @@
 #include <opencv2/core.hpp>
 #include <openvino/openvino.hpp>
 
-namespace bsaps {
+namespace eggvision {
 
 struct LetterboxTransform {
     float scale = 1.0F;
@@ -76,4 +76,4 @@ private:
     std::atomic<bool> running_{false};
 };
 
-}  // namespace bsaps
+}  // namespace eggvision

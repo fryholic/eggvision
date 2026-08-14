@@ -1,8 +1,8 @@
 #pragma once
 
-#include "bsaps/config.hpp"
-#include "bsaps/frame.hpp"
-#include "bsaps/metrics.hpp"
+#include "eggvision/config.hpp"
+#include "eggvision/frame.hpp"
+#include "eggvision/metrics.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -19,7 +19,7 @@
 #include <libcamera/camera_manager.h>
 #include <libcamera/framebuffer_allocator.h>
 
-namespace bsaps {
+namespace eggvision {
 
 class CameraCapture {
 public:
@@ -86,5 +86,5 @@ private:
     StreamView lores_layout_;
 };
 
-}  // namespace bsaps
+}  // namespace eggvision
 

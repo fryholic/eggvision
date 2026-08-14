@@ -125,7 +125,7 @@ class RtspConnection:
     ) -> Response:
         request_headers = {
             "CSeq": str(self.cseq),
-            "User-Agent": "bsaps-rtsp-lifecycle-test/1.0",
+            "User-Agent": "eggvision-rtsp-lifecycle-test/1.0",
         }
         self.cseq += 1
         if self.session:

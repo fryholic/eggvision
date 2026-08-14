@@ -8,7 +8,7 @@ resource_log="${log}.resources"
 
 export LD_LIBRARY_PATH="/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 started_epoch="$(date +%s)"
-stdbuf -oL -eL ./build/bsaps_app --duration "$duration" >"$log" 2>&1 &
+stdbuf -oL -eL ./build/eggvision_app --duration "$duration" >"$log" 2>&1 &
 app_pid=$!
 trap 'kill -TERM "$app_pid" 2>/dev/null || true' EXIT
 

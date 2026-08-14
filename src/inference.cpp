@@ -1,4 +1,4 @@
-#include "bsaps/inference.hpp"
+#include "eggvision/inference.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,7 +11,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-namespace bsaps {
+namespace eggvision {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -335,4 +335,4 @@ void InferenceWorker::stop() {
     std::cout << "[inference] stopped\n";
 }
 
-}  // namespace bsaps
+}  // namespace eggvision

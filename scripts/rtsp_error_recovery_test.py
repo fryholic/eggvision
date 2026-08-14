@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify two-client shared-media ERROR recovery and a fresh RTP session.
 
-The application must be configured with ``-DBSAPS_ENABLE_TEST_HOOKS=ON``.
+The application must be configured with ``-DEGGVISION_ENABLE_TEST_HOOKS=ON``.
 Normal builds compile the trigger hook out completely.
 """
 
@@ -136,7 +136,7 @@ def validate(log: str, return_code: int, expect_timeout: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--duration", type=int, default=12)
     parser.add_argument("--timeout", type=float, default=10.0)
@@ -153,14 +153,14 @@ def main() -> int:
     if args.duration < 8 or args.timeout <= 0 or args.teardown_delay_ms < 0:
         parser.error("duration must be at least 8 and timeout must be positive")
 
-    with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-recovery-") as directory:
+    with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-recovery-") as directory:
         root = Path(directory)
         trigger = root / "inject-error"
         log_path = root / "server.log"
         environment = os.environ.copy()
-        environment["BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
+        environment["EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
         if args.teardown_delay_ms:
-            environment["BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS"] = str(
+            environment["EGGVISION_RTSP_TEST_TEARDOWN_DELAY_MS"] = str(
                 args.teardown_delay_ms
             )
         environment["G_DEBUG"] = "fatal-criticals"

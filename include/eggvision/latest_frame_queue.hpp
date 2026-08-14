@@ -5,7 +5,7 @@
 #include <optional>
 #include <utility>
 
-namespace bsaps {
+namespace eggvision {
 
 // A bounded queue with capacity one. A slow consumer always receives the latest
 // frame and cannot create unbounded latency or exhaust camera requests.
@@ -62,4 +62,4 @@ private:
     bool closed_ = false;
 };
 
-}  // namespace bsaps
+}  // namespace eggvision

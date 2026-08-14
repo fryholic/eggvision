@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cstdint>
 
-namespace bsaps {
+namespace eggvision {
 
 struct Metrics {
     std::atomic<std::uint64_t> captured{0};
@@ -23,4 +23,4 @@ struct Metrics {
     std::atomic<std::uint64_t> inference_total_us{0};
 };
 
-}  // namespace bsaps
+}  // namespace eggvision
