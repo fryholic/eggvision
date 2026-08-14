@@ -9,10 +9,16 @@ User=pi
 Group=video
 WorkingDirectory=/home/pi/eggvision
 Environment=LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib
-ExecStart=/home/pi/eggvision/build/eggvision_app
+StateDirectory=eggvision
+StateDirectoryMode=0750
+ExecStart=/home/pi/eggvision/build/eggvision_app \
+  --events-dir /var/lib/eggvision/events \
+  --event-pre-seconds 1.5 \
+  --event-post-seconds 1.5 \
+  --event-cooldown-seconds 10
 Restart=on-failure
 RestartSec=3
-TimeoutStopSec=15
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

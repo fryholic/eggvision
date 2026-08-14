@@ -15,15 +15,20 @@ flowchart LR
     C --> L["lores YUV420 DMABUF 640×480"]
     M --> G["GstDmaBufMemory"]
     G --> V["v4l2h264enc DMABUF import"]
-    V --> R["RTSP H.264 High@L4"]
+    V --> A["H.264 access units"]
+    A --> R["RTSP H.264 High@L4"]
+    A --> B["4-second bounded RAM ring"]
     L --> Q["latest-frame queue capacity 1"]
     Q --> O["OpenCV pre-process + OpenVINO CPU"]
-    R --> F["FrameLease release"]
+    O --> T["person detection trigger"]
+    T --> E["JPEG + pre/post event MP4"]
+    B --> E
+    V --> F["FrameLease release"]
     O --> F
     F --> X["Request reuse and requeue"]
 ```
 
-`FrameLease`를 RTSP와 추론 소비자가 공유한다. 두 소비자가 참조를 모두 반환하기 전에는 libcamera 요청을 재사용하지 않는다. 느린 추론은 용량 1의 큐에서 오래된 프레임만 교체하므로 카메라 요청을 고갈시키지 않는다.
+`FrameLease`는 상시 H.264 인코더와 추론 소비자가 공유한다. 두 소비자가 참조를 모두 반환하기 전에는 libcamera 요청을 재사용하지 않는다. RTSP와 이벤트 녹화는 애플리케이션이 소유하는 압축 AU를 공유하므로 카메라 요청을 붙잡지 않는다. 감지 이벤트는 같은 paired Request의 main 프레임만 한 번 복사한 뒤 lease를 즉시 반환한다.
 
 ## 의존성 설치
 
@@ -93,14 +98,43 @@ export LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRAR
 --port 8554
 --mount /stream
 --bitrate 4000000
+--gop 15
 --confidence 0.30
 --nms 0.45
 --inference-threads 2
+--events-dir /var/lib/eggvision/events
+--event-pre-seconds 1.5
+--event-post-seconds 1.5
+--event-cooldown-seconds 10
+--event-ring-seconds 4
+--event-ring-max-bytes 8388608
+--event-min-free-bytes 1073741824
+--event-jpeg-quality 90
+--event-container mp4
 --duration SECONDS
 --no-inference
+--no-event-recording
 ```
 
 확정된 해상도, stride, plane FD/offset, 모델 shape를 시작할 때 출력한다. 5초마다 캡처·RTSP·추론 FPS, 드롭 수, outstanding lease, 오류 수를 JSON 한 줄로 출력한다. SIGINT와 SIGTERM은 카메라 생산 중지, RTSP 종료, 추론 종료 순서로 안전하게 정리한다.
+
+## 사람 감지 이벤트 저장
+
+사람이 감지되면 `/var/lib/eggvision/events/YYYY-MM-DD/<event-id>/` 아래에 다음 파일을 저장한다.
+
+- `snapshot.jpg`: 감지에 사용한 lores 프레임과 동일한 paired Request의 1920×1080 main 프레임
+- `clip.mp4`: 감지 sensor timestamp 전후 각각 1.5초를 포함하는 H.264 High@L4 영상. 앞쪽 경계 이전의 가장 가까운 IDR부터 시작하며 재인코딩하지 않는다.
+- `metadata.json`: 요청·실제 영상 경계, detection 좌표, pre/post 완전성, artifact 상태와 오류
+
+작업 중에는 숨김 `.partial` 디렉터리를 사용하고 finalize가 끝난 이벤트만 최종 이름으로 원자적으로 공개한다. 기본 10초 cooldown 동안의 반복 감지는 별도 이벤트로 만들지 않는다. 저장소의 가용 공간이 기본 1 GiB보다 적으면 새 이벤트만 거부하고 카메라·추론·RTSP는 계속 동작한다.
+
+개발 빌드에서 실제 모델 검출과 무관하게 한 번 재현하려면 test hook을 켜고 실행한다.
+
+```bash
+cmake -S . -B build -DEGGVISION_ENABLE_TEST_HOOKS=ON
+EGGVISION_EVENT_TEST_TRIGGER_AFTER_MS=2000 ./build/eggvision_app \
+  --events-dir /tmp/eggvision-events --duration 8 --no-inference
+```
 
 ## RTSP 확인
 
