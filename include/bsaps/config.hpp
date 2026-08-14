@@ -16,6 +16,7 @@ struct AppConfig {
     std::string rtsp_address = "0.0.0.0";
     std::string rtsp_port = "8554";
     std::string rtsp_mount = "/stream";
+    unsigned rtsp_max_sessions = 32;
     unsigned bitrate = 4'000'000;
     unsigned gop = 30;
 

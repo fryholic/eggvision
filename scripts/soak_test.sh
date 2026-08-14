@@ -8,7 +8,7 @@ resource_log="${log}.resources"
 
 export LD_LIBRARY_PATH="/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 started_epoch="$(date +%s)"
-./build/bsaps_app --duration "$duration" >"$log" 2>&1 &
+stdbuf -oL -eL ./build/bsaps_app --duration "$duration" >"$log" 2>&1 &
 app_pid=$!
 trap 'kill -TERM "$app_pid" 2>/dev/null || true' EXIT
 
@@ -31,6 +31,8 @@ grep -q '\[camera\] capture started' "$log" || { echo "application did not start
 ) >"$resource_log" &
 monitor_pid=$!
 
+python3 ./scripts/rtsp_lifecycle_test.py \
+  rtsp://127.0.0.1:8554/stream --cycles 30 --settle-ms 0 --timeout 10
 ./scripts/verify_rtsp.sh rtsp://127.0.0.1:8554/stream 3 10
 wait "$app_pid"
 wait "$monitor_pid" || true

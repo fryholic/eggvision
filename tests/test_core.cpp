@@ -56,6 +56,12 @@ int main() {
     int latest = 0;
     expect(queue.waitPop(latest) && latest == 2, "latest-frame queue returns newest item");
     queue.close();
+    expect(!queue.push(3), "closed latest-frame queue rejects input");
+    queue.reopen();
+    expect(!queue.push(4), "reopened latest-frame queue accepts input");
+    expect(queue.waitPop(latest) && latest == 4,
+           "reopened latest-frame queue starts a fresh epoch");
+    queue.close();
 
     int releases = 0;
     {
