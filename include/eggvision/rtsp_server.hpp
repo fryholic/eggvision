@@ -1,7 +1,7 @@
 #pragma once
 
 #include "eggvision/config.hpp"
-#include "eggvision/frame.hpp"
+#include "eggvision/encoded_access_unit.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 #include "eggvision/metrics.hpp"
 
@@ -28,7 +28,7 @@ public:
     RtspServer &operator=(const RtspServer &) = delete;
 
     bool start();
-    void submit(std::shared_ptr<FrameLease> frame);
+    void submit(EncodedAccessUnitPtr unit);
     // Synchronous lifetime boundary: returns only after recovery workers and
     // every GStreamer object owned by this server have released their leases.
     // A stalled teardown is reported periodically and keeps blocking safely.
@@ -118,9 +118,7 @@ private:
     void disableCallbacksAndWait();
     void stopLocked();
     void feederLoop();
-    GstBuffer *makeBuffer(std::shared_ptr<FrameLease> frame,
-                          std::uint64_t base_timestamp,
-                          std::uint64_t frame_index) const;
+    GstBuffer *makeBuffer(EncodedAccessUnitPtr unit, std::uint64_t frame_index) const;
 
     AppConfig config_;
     Metrics &metrics_;
@@ -138,7 +136,7 @@ private:
     std::thread recovery_worker_thread_;
     std::shared_ptr<RecoveryWorkerState> recovery_worker_state_;
     std::shared_ptr<SessionCleanupState> session_cleanup_state_;
-    LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
+    LatestFrameQueue<EncodedAccessUnitPtr> latest_;
     mutable std::mutex source_mutex_;
     GstAppSrc *appsrc_ = nullptr;
     GstRTSPMedia *current_media_ = nullptr;

@@ -1,5 +1,7 @@
 #include "eggvision/camera_capture.hpp"
 #include "eggvision/config.hpp"
+#include "eggvision/encoded_ring_buffer.hpp"
+#include "eggvision/h264_encoder.hpp"
 #include "eggvision/inference.hpp"
 #include "eggvision/metrics.hpp"
 #include "eggvision/rtsp_server.hpp"
@@ -116,14 +118,21 @@ int main(int argc, char **argv) {
         printConfiguration(config);
         eggvision::Metrics metrics;
         eggvision::RtspServer rtsp(config, metrics);
+        eggvision::H264Encoder encoder(config, metrics);
+        eggvision::EncodedRingBuffer encoded_history(4ULL * 1'000'000'000ULL,
+                                                      8ULL * 1024ULL * 1024ULL);
         eggvision::InferenceWorker inference(config, metrics);
         eggvision::CameraCapture camera(config, metrics);
 
-        if (!inference.initialize() || !camera.initialize()) {
+        if (!inference.initialize() || !encoder.initialize() || !camera.initialize()) {
             return 2;
         }
-        camera.setMainConsumer([&rtsp](std::shared_ptr<eggvision::FrameLease> frame) {
-            rtsp.submit(std::move(frame));
+        encoder.setConsumer([&rtsp, &encoded_history](eggvision::EncodedAccessUnitPtr unit) {
+            encoded_history.push(unit);
+            rtsp.submit(std::move(unit));
+        });
+        camera.setMainConsumer([&encoder](std::shared_ptr<eggvision::FrameLease> frame) {
+            encoder.submit(std::move(frame));
         });
         if (config.inference_enabled) {
             camera.setInferenceConsumer([&inference](std::shared_ptr<eggvision::FrameLease> frame) {
@@ -133,12 +142,15 @@ int main(int argc, char **argv) {
 
         // Do not expose the RTSP listener until the camera is producing frames;
         // otherwise an eager client can make the first DESCRIBE fail with 503.
-        if (!inference.start() || !camera.start() || !rtsp.start()) {
+        if (!encoder.start() || !inference.start() || !camera.start() ||
+            !encoder.waitForIndependentFrame(std::chrono::seconds(5)) || !rtsp.start()) {
             camera.stop();
             inference.stop();
+            encoder.stop();
             rtsp.stop();
             std::cout << "[app] startup failed outstanding="
                       << metrics.outstanding_leases.load()
+                      << " encoder_errors=" << metrics.encoder_errors.load()
                       << " capture_errors=" << metrics.capture_errors.load()
                       << " rtsp_errors=" << metrics.rtsp_errors.load()
                       << " rtsp_recoveries=" << metrics.rtsp_recoveries.load()
@@ -176,6 +188,12 @@ int main(int argc, char **argv) {
                       << ",\"inference_fps\":" << (inferred - last_inference) / seconds
                       << ",\"inference_avg_ms\":" << average_inference_ms
                       << ",\"outstanding_leases\":" << metrics.outstanding_leases.load()
+                      << ",\"encoder_access_units\":"
+                      << metrics.encoder_access_units.load()
+                      << ",\"encoder_output_bytes\":"
+                      << metrics.encoder_output_bytes.load()
+                      << ",\"encoder_dropped\":" << metrics.encoder_dropped.load()
+                      << ",\"encoder_errors\":" << metrics.encoder_errors.load()
                       << ",\"rtsp_dropped\":" << metrics.rtsp_dropped.load()
                       << ",\"inference_dropped\":" << metrics.inference_dropped.load()
                       << ",\"capture_errors\":" << metrics.capture_errors.load()
@@ -196,13 +214,16 @@ int main(int argc, char **argv) {
 
         std::cout << "[app] graceful shutdown requested\n";
         camera.stop();          // Stop producing before releasing downstream buffers.
-        rtsp.stop();
         inference.stop();
+        encoder.stop();
+        rtsp.stop();
         std::cout << "[app] stopped captured=" << metrics.captured.load()
                   << " rtsp=" << metrics.rtsp_pushed.load()
                   << " inferred=" << metrics.inference_processed.load()
+                  << " encoded=" << metrics.encoder_access_units.load()
                   << " outstanding=" << metrics.outstanding_leases.load()
                   << " capture_errors=" << metrics.capture_errors.load()
+                  << " encoder_errors=" << metrics.encoder_errors.load()
                   << " rtsp_errors=" << metrics.rtsp_errors.load()
                   << " rtsp_recoveries=" << metrics.rtsp_recoveries.load()
                   << " rtsp_recovery_failures="

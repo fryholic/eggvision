@@ -1,5 +1,6 @@
 #include "eggvision/camera_capture.hpp"
 #include "eggvision/config.hpp"
+#include "eggvision/h264_encoder.hpp"
 #include "eggvision/metrics.hpp"
 #include "eggvision/rtsp_server.hpp"
 
@@ -165,15 +166,19 @@ int main(int argc, char **argv) {
         config.rtsp_port = port;
         eggvision::Metrics metrics;
         eggvision::RtspServer server(config, metrics);
+        eggvision::H264Encoder encoder(config, metrics);
         eggvision::CameraCapture camera(config, metrics);
-        if (!camera.initialize()) {
-            throw std::runtime_error("camera initialization failed");
+        if (!encoder.initialize() || !camera.initialize()) {
+            throw std::runtime_error("encoder or camera initialization failed");
         }
-        camera.setMainConsumer([&server](std::shared_ptr<eggvision::FrameLease> frame) {
-            server.submit(std::move(frame));
+        encoder.setConsumer([&server](eggvision::EncodedAccessUnitPtr unit) {
+            server.submit(std::move(unit));
         });
-        if (!camera.start()) {
-            throw std::runtime_error("camera start failed");
+        camera.setMainConsumer([&encoder](std::shared_ptr<eggvision::FrameLease> frame) {
+            encoder.submit(std::move(frame));
+        });
+        if (!encoder.start() || !camera.start()) {
+            throw std::runtime_error("encoder or camera start failed");
         }
 
         const std::string url = server.url("127.0.0.1");
@@ -303,6 +308,7 @@ int main(int argc, char **argv) {
         }
 
         camera.stop();
+        encoder.stop();
         server.stop();
         if (metrics.outstanding_leases.load() != 0) {
             throw std::runtime_error("outstanding leases remain: " +

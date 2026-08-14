@@ -1,4 +1,5 @@
 #include "eggvision/encoded_ring_buffer.hpp"
+#include "eggvision/h264_bitstream.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -137,6 +138,23 @@ void testByteLimitAndInvalidUnits() {
            "single oversize unit is rejected");
 }
 
+void testH264AnnexBInspection() {
+    const std::vector<std::uint8_t> stream{
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x01,
+        0x00, 0x00, 0x01, 0x68, 0x02,
+        0x00, 0x00, 0x00, 0x01, 0x65, 0x03,
+    };
+    const auto summary = eggvision::inspectH264ByteStream(stream.data(), stream.size());
+    expect(summary.has_sps, "Annex B parser finds SPS");
+    expect(summary.has_pps, "Annex B parser finds PPS");
+    expect(summary.has_idr, "Annex B parser finds IDR");
+
+    const std::vector<std::uint8_t> delta{0x00, 0x00, 0x01, 0x41, 0x55};
+    const auto delta_summary = eggvision::inspectH264ByteStream(delta.data(), delta.size());
+    expect(!delta_summary.has_sps && !delta_summary.has_pps && !delta_summary.has_idr,
+           "Annex B parser does not promote a delta slice");
+}
+
 }  // namespace
 
 int main() {
@@ -146,6 +164,7 @@ int main() {
     testGenerationAndTimestampReset();
     testTimeRetentionKeepsBoundaryKeyframe();
     testByteLimitAndInvalidUnits();
+    testH264AnnexBInspection();
 
     if (failures == 0) {
         std::cout << "all event core tests passed\n";

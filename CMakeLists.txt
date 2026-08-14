@@ -26,6 +26,8 @@ find_package(Threads REQUIRED)
 add_library(eggvision_core
     src/camera_capture.cpp
     src/encoded_ring_buffer.cpp
+    src/h264_bitstream.cpp
+    src/h264_encoder.cpp
     src/inference.cpp
     src/rtsp_server.cpp)
 
