@@ -53,7 +53,7 @@ def main() -> int:
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
                 [
-                    str(app), "--no-inference", "--duration", "30",
+                    str(app), "--no-inference", "--no-event-recording", "--duration", "30",
                     "--max-rtsp-sessions", str(args.max_sessions),
                 ],
                 stdout=log_file,
@@ -99,6 +99,10 @@ def main() -> int:
                 fresh.teardown()
             finally:
                 fresh.close()
+            # Session creation is staggered, so the first pool watch can
+            # legitimately leave the newest sessions active. Wait through one
+            # full test timeout before asserting the cumulative cleanup count.
+            time.sleep(5.0)
             process.terminate()
             code = process.wait(timeout=args.timeout)
         finally:

@@ -20,13 +20,18 @@ pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
 # The Raspberry Pi image installs these config packages outside the default path.
 list(APPEND CMAKE_PREFIX_PATH "/usr/local/runtime/cmake" "/usr/local/lib/cmake/opencv4")
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
 find_package(Threads REQUIRED)
 
 add_library(eggvision_core
     src/camera_capture.cpp
+    src/encoded_ring_buffer.cpp
+    src/event_recorder.cpp
+    src/h264_bitstream.cpp
+    src/h264_encoder.cpp
     src/inference.cpp
-    src/rtsp_server.cpp)
+    src/rtsp_server.cpp
+    src/snapshot.cpp)
 
 target_include_directories(eggvision_core
     PUBLIC
@@ -58,6 +63,10 @@ if(EGGVISION_BUILD_TESTS)
     target_link_libraries(eggvision_tests PRIVATE eggvision_core)
     add_test(NAME eggvision_core_tests COMMAND eggvision_tests)
 
+    add_executable(eggvision_event_core_tests tests/event_core_test.cpp)
+    target_link_libraries(eggvision_event_core_tests PRIVATE eggvision_core)
+    add_test(NAME eggvision_event_core_tests COMMAND eggvision_event_core_tests)
+
     add_executable(eggvision_model_smoke tests/model_smoke.cpp)
     target_link_libraries(eggvision_model_smoke PRIVATE openvino::runtime Threads::Threads)
 
@@ -66,6 +75,12 @@ if(EGGVISION_BUILD_TESTS)
         # It reuses one RtspServer across normal and fault-rollback epochs.
         add_executable(eggvision_rtsp_restart_test tests/rtsp_restart_harness.cpp)
         target_link_libraries(eggvision_rtsp_restart_test PRIVATE eggvision_core)
+
+        add_executable(eggvision_snapshot_test tests/snapshot_harness.cpp)
+        target_link_libraries(eggvision_snapshot_test PRIVATE eggvision_core)
+
+        add_executable(eggvision_event_recording_test tests/event_recording_harness.cpp)
+        target_link_libraries(eggvision_event_recording_test PRIVATE eggvision_core)
     endif()
 endif()
 

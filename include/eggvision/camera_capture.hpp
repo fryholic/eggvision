@@ -49,6 +49,9 @@ private:
         const std::uint8_t *data = nullptr;
     };
 
+    using MappingTable =
+        std::unordered_map<libcamera::FrameBuffer *, std::vector<Mapping>>;
+
     struct RecyclerState {
         std::mutex mutex;
         std::condition_variable cv;
@@ -59,10 +62,13 @@ private:
     bool configureStreams();
     bool allocateBuffers();
     bool createRequests();
-    void unmapBuffers();
+    bool mapBuffers(libcamera::Stream *stream, MappingTable &mappings, const char *name);
+    static void unmapBuffers(MappingTable &mappings);
     void onRequestCompleted(libcamera::Request *request);
     void recyclerLoop();
-    StreamView makeView(libcamera::FrameBuffer *buffer, bool mapped) const;
+    StreamView makeView(libcamera::FrameBuffer *buffer,
+                        const StreamView &layout,
+                        const MappingTable &mappings) const;
     void releaseRequest(libcamera::Request *request);
 
     AppConfig config_values_;
@@ -74,7 +80,8 @@ private:
     libcamera::Stream *lores_stream_ = nullptr;
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator_;
     std::vector<std::unique_ptr<libcamera::Request>> requests_;
-    std::unordered_map<libcamera::FrameBuffer *, std::vector<Mapping>> lores_mappings_;
+    MappingTable main_mappings_;
+    MappingTable lores_mappings_;
     std::shared_ptr<RecyclerState> recycler_;
     std::thread recycler_thread_;
     std::atomic<bool> initialized_{false};

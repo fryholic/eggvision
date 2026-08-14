@@ -6,6 +6,7 @@
 #include "eggvision/metrics.hpp"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -45,6 +46,9 @@ void bgrToNormalizedRgbChw(const cv::Mat &bgr, float *destination);
 
 class InferenceWorker {
 public:
+    using DetectionConsumer =
+        std::function<void(const std::shared_ptr<FrameLease> &, const std::vector<Detection> &)>;
+
     InferenceWorker(const AppConfig &config, Metrics &metrics);
     ~InferenceWorker();
 
@@ -53,6 +57,7 @@ public:
 
     bool initialize();
     bool start();
+    void setDetectionConsumer(DetectionConsumer consumer);
     void submit(std::shared_ptr<FrameLease> frame);
     void stop();
 
@@ -70,6 +75,7 @@ private:
     std::shared_ptr<ov::Model> model_;
     ov::CompiledModel compiled_model_;
     ov::InferRequest infer_request_;
+    DetectionConsumer detection_consumer_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
     std::thread worker_;
     std::atomic<bool> initialized_{false};

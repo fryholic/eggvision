@@ -3,12 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-required_commands=(rpicam-hello gst-launch-1.0 gst-inspect-1.0 v4l2-ctl cmake pkg-config)
+required_commands=(rpicam-hello gst-launch-1.0 gst-inspect-1.0 gst-discoverer-1.0 v4l2-ctl cmake pkg-config)
 for command in "${required_commands[@]}"; do
   command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }
 done
 
-for element in appsrc queue v4l2h264enc h264parse rtph264pay; do
+for element in appsrc appsink queue v4l2h264enc h264parse rtph264pay mp4mux matroskamux filesink qtdemux; do
   gst-inspect-1.0 "$element" >/dev/null || { echo "missing GStreamer element: $element" >&2; exit 1; }
 done
 

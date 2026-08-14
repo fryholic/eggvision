@@ -1,7 +1,7 @@
 #pragma once
 
 #include "eggvision/config.hpp"
-#include "eggvision/frame.hpp"
+#include "eggvision/encoded_access_unit.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 #include "eggvision/metrics.hpp"
 
@@ -28,7 +28,7 @@ public:
     RtspServer &operator=(const RtspServer &) = delete;
 
     bool start();
-    void submit(std::shared_ptr<FrameLease> frame);
+    void submit(EncodedAccessUnitPtr unit);
     // Synchronous lifetime boundary: returns only after recovery workers and
     // every GStreamer object owned by this server have released their leases.
     // A stalled teardown is reported periodically and keeps blocking safely.
@@ -37,6 +37,8 @@ public:
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
     bool recoveryRunningForTest() const;
     bool runningForTest() const { return running_.load(std::memory_order_acquire); }
+    std::uint64_t appsrcBoundForTest() const;
+    std::uint64_t appsrcDestroyedForTest() const;
 #endif
 
 private:
@@ -118,9 +120,7 @@ private:
     void disableCallbacksAndWait();
     void stopLocked();
     void feederLoop();
-    GstBuffer *makeBuffer(std::shared_ptr<FrameLease> frame,
-                          std::uint64_t base_timestamp,
-                          std::uint64_t frame_index) const;
+    GstBuffer *makeBuffer(EncodedAccessUnitPtr unit, std::uint64_t frame_index) const;
 
     AppConfig config_;
     Metrics &metrics_;
@@ -138,7 +138,7 @@ private:
     std::thread recovery_worker_thread_;
     std::shared_ptr<RecoveryWorkerState> recovery_worker_state_;
     std::shared_ptr<SessionCleanupState> session_cleanup_state_;
-    LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
+    LatestFrameQueue<EncodedAccessUnitPtr> latest_;
     mutable std::mutex source_mutex_;
     GstAppSrc *appsrc_ = nullptr;
     GstRTSPMedia *current_media_ = nullptr;
@@ -166,6 +166,11 @@ private:
     GstRTSPMediaStatus observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
     gint64 status_since_us_ = 0;
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
+    struct TestAppSrcLifetimeState {
+        std::atomic<std::uint64_t> bound{0};
+        std::atomic<std::uint64_t> destroyed{0};
+    };
+    static void testAppSrcDestroyed(gpointer data, GObject *object);
     std::string test_push_error_trigger_;
     unsigned test_push_errors_remaining_ = 0;
     bool test_push_error_consumed_ = false;
@@ -179,6 +184,8 @@ private:
     bool test_fail_cleanup_thread_create_ = false;
     bool test_fail_feeder_thread_create_ = false;
     bool test_fail_loop_thread_create_ = false;
+    bool test_force_initial_keyframe_drop_ = false;
+    std::shared_ptr<TestAppSrcLifetimeState> test_appsrc_lifetime_;
 #endif
 };
 

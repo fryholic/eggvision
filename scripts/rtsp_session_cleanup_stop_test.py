@@ -39,7 +39,7 @@ def main() -> int:
             environment["G_DEBUG"] = "fatal-criticals"
             with log_path.open("wb") as log_file:
                 process = subprocess.Popen(
-                    [str(app), "--no-inference", "--duration", "30"],
+                    [str(app), "--no-inference", "--no-event-recording", "--duration", "30"],
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     env=environment,

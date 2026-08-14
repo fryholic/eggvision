@@ -1,7 +1,6 @@
 #include "eggvision/rtsp_server.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -10,19 +9,21 @@
 #include <system_error>
 #include <unistd.h>
 
-#include <gst/allocators/gstdmabuf.h>
-#include <gst/video/video.h>
-
 namespace eggvision {
 namespace {
 
-GQuark leaseQuark() {
-    static const GQuark quark = g_quark_from_static_string("eggvision-frame-lease");
-    return quark;
-}
+struct GstAppSrcUnref {
+    void operator()(GstAppSrc *source) const {
+        if (source) {
+            gst_object_unref(source);
+        }
+    }
+};
 
-void destroyLease(gpointer data) {
-    delete static_cast<std::shared_ptr<FrameLease> *>(data);
+using GstAppSrcRef = std::unique_ptr<GstAppSrc, GstAppSrcUnref>;
+
+void destroyEncodedUnit(gpointer data) {
+    delete static_cast<EncodedAccessUnitPtr *>(data);
 }
 
 }  // namespace
@@ -105,6 +106,7 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
     : config_(config), metrics_(metrics), callback_state_(std::make_shared<CallbackState>()) {
     callback_state_->server = this;
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
+    test_appsrc_lifetime_ = std::make_shared<TestAppSrcLifetimeState>();
     // This hook is compiled out of normal builds. Test builds opt in through
     // EGGVISION_ENABLE_TEST_HOOKS and still remain inert unless the trigger path is
     // explicitly supplied in the environment.
@@ -147,6 +149,8 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
         g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE"), "1") == 0;
     test_fail_loop_thread_create_ =
         g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_LOOP_THREAD_CREATE"), "1") == 0;
+    test_force_initial_keyframe_drop_ =
+        g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FORCE_INITIAL_KEYFRAME_DROP"), "1") == 0;
 #endif
     gst_init(nullptr, nullptr);
 }
@@ -154,6 +158,22 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
 RtspServer::~RtspServer() {
     stop();
 }
+
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+void RtspServer::testAppSrcDestroyed(gpointer data, GObject *) {
+    auto *state = static_cast<std::shared_ptr<TestAppSrcLifetimeState> *>(data);
+    (*state)->destroyed.fetch_add(1, std::memory_order_release);
+    delete state;
+}
+
+std::uint64_t RtspServer::appsrcBoundForTest() const {
+    return test_appsrc_lifetime_->bound.load(std::memory_order_acquire);
+}
+
+std::uint64_t RtspServer::appsrcDestroyedForTest() const {
+    return test_appsrc_lifetime_->destroyed.load(std::memory_order_acquire);
+}
+#endif
 
 GSource *RtspServer::createListenerSource() {
     if (!server_) {
@@ -212,19 +232,7 @@ bool RtspServer::installFactory() {
     std::ostringstream pipeline;
     pipeline << "( appsrc name=source is-live=true format=time do-timestamp=false block=false "
              << "max-buffers=1 leaky-type=downstream "
-             // GStreamer 1.22's v4l2 encoder imports GstDmaBufMemory but its pad
-             // template advertises plain video/x-raw. Adding the memory feature
-             // causes a not-linked error; the memory object remains DMABUF here.
-             << "! video/x-raw,format=I420,width=" << config_.main_width
-             << ",height=" << config_.main_height << ",framerate=" << config_.fps
-             << "/1,colorimetry=bt709,interlace-mode=progressive,pixel-aspect-ratio=1/1 "
-             << "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
-             << "! v4l2h264enc output-io-mode=5 capture-io-mode=2 "
-             << "extra-controls=\"controls,h264_level=11,h264_profile=4,video_bitrate="
-             << config_.bitrate << ",video_gop_size=" << config_.gop
-             << ",h264_i_frame_period=" << config_.gop
-             << ",repeat_sequence_header=1\" "
-             << "! video/x-h264,profile=high,level=(string)4 "
+             << "! video/x-h264,stream-format=byte-stream,alignment=au,profile=high,level=(string)4 "
              << "! h264parse config-interval=1 "
              << "! rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400 )";
 
@@ -395,21 +403,12 @@ bool RtspServer::start() {
         return false;
     }
     std::cout << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
-              << config_.rtsp_mount << " (H264 High@L4, DMABUF import)\n";
+              << config_.rtsp_mount << " (pre-encoded H264 High@L4)\n";
     return true;
 }
 
-void RtspServer::submit(std::shared_ptr<FrameLease> frame) {
-    if (!running_.load()) {
-        return;
-    }
-    // A zero-copy GstBuffer owns its libcamera request until every downstream
-    // element releases it. Always leave at least two requests available to the
-    // camera so a pipeline state transition cannot deadlock capture by holding
-    // the entire request pool.
-    const std::uint64_t reserve = std::min<std::uint64_t>(2, config_.buffer_count / 2);
-    if (metrics_.outstanding_leases.load() >= config_.buffer_count - reserve) {
-        metrics_.rtsp_dropped.fetch_add(1);
+void RtspServer::submit(EncodedAccessUnitPtr unit) {
+    if (!running_.load() || !unit) {
         return;
     }
     {
@@ -419,7 +418,7 @@ void RtspServer::submit(std::shared_ptr<FrameLease> frame) {
             return;
         }
     }
-    if (latest_.push(std::move(frame))) {
+    if (latest_.push(std::move(unit))) {
         metrics_.rtsp_dropped.fetch_add(1);
     }
 }
@@ -748,10 +747,9 @@ void RtspServer::requestRecoveryWorkerStop() {
     if (!recovery_worker_thread_.joinable()) {
         return;
     }
-    // RecoveryJob's GObject graph can own GstBuffers whose qdata owns a
-    // FrameLease. That lease still accounts against Metrics and represents a
-    // camera request, so the worker is part of this object's shutdown graph.
-    // It must never outlive stop()/the next start epoch.
+    // RecoveryJob's GObject graph can own compressed GstBuffers and callbacks,
+    // so the worker remains part of this object's shutdown graph and must not
+    // outlive stop() or the next start epoch.
     recovery_worker_thread_.join();
 }
 
@@ -854,15 +852,11 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
                  "block", FALSE,
                  nullptr);
     gst_app_src_set_stream_type(GST_APP_SRC(source), GST_APP_STREAM_TYPE_STREAM);
-    GstCaps *caps = gst_caps_new_simple("video/x-raw",
-                                        "format", G_TYPE_STRING, "I420",
-                                        "width", G_TYPE_INT, static_cast<int>(config_.main_width),
-                                        "height", G_TYPE_INT, static_cast<int>(config_.main_height),
-                                        "framerate", GST_TYPE_FRACTION,
-                                        static_cast<int>(config_.fps), 1,
-                                        "colorimetry", G_TYPE_STRING, "bt709",
-                                        "interlace-mode", G_TYPE_STRING, "progressive",
-                                        "pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1,
+    GstCaps *caps = gst_caps_new_simple("video/x-h264",
+                                        "stream-format", G_TYPE_STRING, "byte-stream",
+                                        "alignment", G_TYPE_STRING, "au",
+                                        "profile", G_TYPE_STRING, "high",
+                                        "level", G_TYPE_STRING, "4",
                                         nullptr);
     gst_app_src_set_caps(GST_APP_SRC(source), caps);
     gst_caps_unref(caps);
@@ -880,6 +874,13 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
         } else if (appsrc_ != GST_APP_SRC(source)) {
             previous = appsrc_;
             appsrc_ = GST_APP_SRC(source);  // gst_bin_get_by_name supplied this reference.
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+            test_appsrc_lifetime_->bound.fetch_add(1, std::memory_order_release);
+            g_object_weak_ref(
+                G_OBJECT(source),
+                RtspServer::testAppSrcDestroyed,
+                new std::shared_ptr<TestAppSrcLifetimeState>(test_appsrc_lifetime_));
+#endif
             generation_.fetch_add(1);
             changed = true;
         }
@@ -898,10 +899,9 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
 }
 
 void RtspServer::onMediaConfigure(GstRTSPMediaFactory *factory, GstRTSPMedia *media) {
-    // The Pi's stateful V4L2 encoder retains imported DMABUFs when the same
-    // pipeline is prepared again. Mark each media non-reusable so GStreamer's
-    // stable shared factory evicts it on unprepare and constructs a fresh
-    // pipeline for the next request without racing mount/factory replacement.
+    // Keep media non-reusable so an errored packetizer pipeline is replaced by
+    // a fresh one without racing mount/factory replacement. The hardware
+    // encoder is independent and continues filling event pre-roll throughout.
     gst_rtsp_media_set_reusable(media, FALSE);
     gst_rtsp_media_set_stop_on_disconnect(media, FALSE);
     gst_rtsp_media_set_eos_shutdown(media, FALSE);
@@ -1387,129 +1387,54 @@ void RtspServer::finishRecoveryIfReady() {
     }
 }
 
-GstBuffer *RtspServer::makeBuffer(std::shared_ptr<FrameLease> frame,
-                                  std::uint64_t base_timestamp,
+GstBuffer *RtspServer::makeBuffer(EncodedAccessUnitPtr unit,
                                   std::uint64_t frame_index) const {
-    const StreamView &view = frame->main();
-    if (view.planes.empty()) {
+    if (!unit || !unit->payload || unit->payload->empty()) {
         return nullptr;
     }
-
-    GstBuffer *buffer = gst_buffer_new();
-    GstAllocator *allocator = gst_dmabuf_allocator_new();
-    if (!buffer || !allocator) {
-        if (buffer) {
-            gst_buffer_unref(buffer);
-        }
-        if (allocator) {
-            gst_object_unref(allocator);
-        }
+    auto *holder = new EncodedAccessUnitPtr(std::move(unit));
+    GstBuffer *buffer = gst_buffer_new_wrapped_full(
+        GST_MEMORY_FLAG_READONLY,
+        const_cast<std::uint8_t *>((*holder)->payload->data()),
+        (*holder)->payload->size(),
+        0,
+        (*holder)->payload->size(),
+        holder,
+        destroyEncodedUnit);
+    if (!buffer) {
+        delete holder;
         return nullptr;
     }
-
-    const bool shared_fd = std::all_of(view.planes.begin(),
-                                       view.planes.end(),
-                                       [&view](const PlaneView &plane) {
-                                           return plane.fd == view.planes.front().fd;
-                                       });
-    if (shared_fd) {
-        const PlaneView &plane = view.planes.front();
-        const int owned_fd = dup(plane.fd);
-        std::size_t allocated_size = 0;
-        for (const PlaneView &candidate : view.planes) {
-            allocated_size = std::max(allocated_size,
-                                      static_cast<std::size_t>(candidate.offset) + candidate.length);
-        }
-        allocated_size = std::max(allocated_size, static_cast<std::size_t>(view.frame_size));
-        GstMemory *memory = owned_fd >= 0
-                                ? gst_dmabuf_allocator_alloc(allocator, owned_fd, allocated_size)
-                                : nullptr;
-        if (!memory) {
-            if (owned_fd >= 0) {
-                close(owned_fd);
-            }
-            gst_object_unref(allocator);
-            gst_buffer_unref(buffer);
-            return nullptr;
-        }
-        gst_buffer_append_memory(buffer, memory);
-    } else if (view.planes.size() == 3) {
-        for (const PlaneView &plane : view.planes) {
-            const int owned_fd = dup(plane.fd);
-            const std::size_t allocated_size = static_cast<std::size_t>(plane.offset) + plane.length;
-            GstMemory *memory = owned_fd >= 0
-                                    ? gst_dmabuf_allocator_alloc(allocator, owned_fd, allocated_size)
-                                    : nullptr;
-            if (!memory) {
-                if (owned_fd >= 0) {
-                    close(owned_fd);
-                }
-                gst_object_unref(allocator);
-                gst_buffer_unref(buffer);
-                return nullptr;
-            }
-            if (plane.offset != 0) {
-                gst_memory_resize(memory, plane.offset, plane.length);
-            }
-            gst_buffer_append_memory(buffer, memory);
-        }
-    } else {
-        gst_object_unref(allocator);
-        gst_buffer_unref(buffer);
-        return nullptr;
-    }
-    gst_object_unref(allocator);
-
-    std::array<gsize, GST_VIDEO_MAX_PLANES> offsets{};
-    std::array<gint, GST_VIDEO_MAX_PLANES> strides{};
-    strides[0] = static_cast<gint>(view.stride);
-    strides[1] = static_cast<gint>(view.stride / 2);
-    strides[2] = static_cast<gint>(view.stride / 2);
-    if (shared_fd && view.planes.size() == 3) {
-        offsets[0] = view.planes[0].offset;
-        offsets[1] = view.planes[1].offset;
-        offsets[2] = view.planes[2].offset;
-    } else {
-        offsets[0] = 0;
-        offsets[1] = static_cast<gsize>(view.stride) * view.height;
-        offsets[2] = offsets[1] + static_cast<gsize>(view.stride / 2) * (view.height / 2);
-    }
-    gst_buffer_add_video_meta_full(buffer,
-                                   GST_VIDEO_FRAME_FLAG_NONE,
-                                   GST_VIDEO_FORMAT_I420,
-                                   view.width,
-                                   view.height,
-                                   3,
-                                   offsets.data(),
-                                   strides.data());
-
-    const std::uint64_t timestamp = frame->sensorTimestampNs();
-    const GstClockTime pts = timestamp >= base_timestamp
-                                 ? static_cast<GstClockTime>(timestamp - base_timestamp)
-                                 : frame_index * GST_SECOND / config_.fps;
+    const GstClockTime pts = frame_index * GST_SECOND / config_.fps;
     GST_BUFFER_PTS(buffer) = pts;
     GST_BUFFER_DTS(buffer) = pts;
-    GST_BUFFER_DURATION(buffer) = GST_SECOND / config_.fps;
+    GST_BUFFER_DURATION(buffer) = (*holder)->duration_ns != 0
+                                      ? (*holder)->duration_ns
+                                      : GST_SECOND / config_.fps;
     GST_BUFFER_OFFSET(buffer) = frame_index;
     GST_BUFFER_OFFSET_END(buffer) = frame_index + 1;
     GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_LIVE);
-
-    auto *holder = new std::shared_ptr<FrameLease>(std::move(frame));
-    gst_mini_object_set_qdata(GST_MINI_OBJECT(buffer), leaseQuark(), holder, destroyLease);
+    if (!(*holder)->keyframe) {
+        GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+    }
     return buffer;
 }
 
 void RtspServer::feederLoop() {
     std::uint64_t observed_generation = generation_.load();
-    std::uint64_t base_timestamp = 0;
     std::uint64_t frame_index = 0;
+    std::uint64_t observed_encoder_generation = 0;
+    bool awaiting_keyframe = true;
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+    bool force_initial_keyframe_drop = false;
+#endif
     while (running_.load()) {
-        std::shared_ptr<FrameLease> frame;
-        if (!latest_.waitPop(frame)) {
+        EncodedAccessUnitPtr unit;
+        if (!latest_.waitPop(unit)) {
             break;
         }
 
-        GstAppSrc *source = nullptr;
+        GstAppSrcRef source;
         std::uint64_t generation = 0;
         std::uint64_t media_generation = 0;
         {
@@ -1517,23 +1442,42 @@ void RtspServer::feederLoop() {
             generation = generation_.load();
             media_generation = media_generation_;
             if (appsrc_) {
-                source = GST_APP_SRC(gst_object_ref(appsrc_));
+                source.reset(GST_APP_SRC(gst_object_ref(appsrc_)));
             }
         }
         if (!source) {
             metrics_.rtsp_dropped.fetch_add(1);
             continue;
         }
-        if (generation != observed_generation || base_timestamp == 0) {
+        if (generation != observed_generation ||
+            observed_encoder_generation != unit->generation) {
             observed_generation = generation;
-            base_timestamp = frame->sensorTimestampNs();
+            observed_encoder_generation = unit->generation;
             frame_index = 0;
+            awaiting_keyframe = true;
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+            force_initial_keyframe_drop = test_force_initial_keyframe_drop_;
+#endif
+        }
+        if (awaiting_keyframe) {
+            bool independently_decodable = unit->independentlyDecodable();
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+            if (independently_decodable && force_initial_keyframe_drop) {
+                force_initial_keyframe_drop = false;
+                independently_decodable = false;
+                std::cout << "[rtsp] test hook discarding initial keyframe\n";
+            }
+#endif
+            if (!independently_decodable) {
+                metrics_.rtsp_dropped.fetch_add(1);
+                continue;
+            }
+            awaiting_keyframe = false;
         }
 
-        GstBuffer *buffer = makeBuffer(frame, base_timestamp, frame_index++);
+        GstBuffer *buffer = makeBuffer(std::move(unit), frame_index++);
         if (!buffer) {
             metrics_.rtsp_errors.fetch_add(1);
-            gst_object_unref(source);
             continue;
         }
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
@@ -1549,12 +1493,11 @@ void RtspServer::feederLoop() {
             gst_buffer_unref(buffer);
             flow = GST_FLOW_ERROR;
         } else {
-            flow = gst_app_src_push_buffer(source, buffer);
+            flow = gst_app_src_push_buffer(source.get(), buffer);
         }
 #else
-        const GstFlowReturn flow = gst_app_src_push_buffer(source, buffer);
+        const GstFlowReturn flow = gst_app_src_push_buffer(source.get(), buffer);
 #endif
-        gst_object_unref(source);
         if (flow == GST_FLOW_OK) {
             metrics_.rtsp_pushed.fetch_add(1);
             std::lock_guard<std::mutex> lock(source_mutex_);
@@ -1631,7 +1574,7 @@ void RtspServer::stopLocked() {
         // A Requested recovery has not taken ownership of any GStreamer
         // object. Cancel it and let this stop path perform the complete normal
         // teardown. A Running job must complete before this stop epoch can
-        // release camera-owned leases or permit the next start epoch.
+        // release compressed-buffer owners or permit the next start epoch.
         if (recovery_state_ == RecoveryState::Running && recovery_job_ &&
             recovery_job_->token == recovery_token_ &&
             !recovery_job_->done.load(std::memory_order_acquire)) {
@@ -1645,12 +1588,12 @@ void RtspServer::stopLocked() {
     destroySource(listener_source);
     requestSessionCleanupStop();
 
-    // A teardown already in flight must finish before camera-owned DMABUF
-    // leases can be reported as released. Keep the owner loop, callbacks,
-    // Metrics and the CameraCapture owner alive while waiting. Fifteen seconds
+    // A teardown already in flight must finish before its compressed buffers
+    // and callbacks can be released. Keep the owner loop and Metrics alive
+    // while waiting. Fifteen seconds
     // is an operational warning boundary, not a lifetime boundary: detaching
-    // here would let GstBuffer qdata release FrameLease after its owners were
-    // destroyed. If a driver really stalls forever the process deliberately
+    // here would let callbacks outlive this server. If a driver really stalls
+    // forever the process deliberately
     // remains in this explicit delayed-shutdown state and reports progress,
     // rather than returning from stop() with unsafe background references.
     if (recovery_job) {

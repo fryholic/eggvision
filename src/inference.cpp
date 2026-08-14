@@ -158,6 +158,10 @@ bool InferenceWorker::start() {
     return true;
 }
 
+void InferenceWorker::setDetectionConsumer(DetectionConsumer consumer) {
+    detection_consumer_ = std::move(consumer);
+}
+
 void InferenceWorker::submit(std::shared_ptr<FrameLease> frame) {
     if (!running_.load()) {
         return;
@@ -309,6 +313,9 @@ void InferenceWorker::workerLoop() {
             const std::uint64_t processed = metrics_.inference_processed.fetch_add(1) + 1;
             metrics_.detected_persons.fetch_add(detections.size());
             metrics_.inference_total_us.fetch_add(static_cast<std::uint64_t>(total_ms * 1000.0));
+            if (!detections.empty() && detection_consumer_) {
+                detection_consumer_(frame, detections);
+            }
             if (processed % 10 == 0 || !detections.empty()) {
                 std::cout << std::fixed << std::setprecision(2)
                           << "{\"type\":\"inference\",\"sequence\":" << frame->sequence()

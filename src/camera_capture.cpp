@@ -19,7 +19,8 @@ CameraCapture::CameraCapture(const AppConfig &config, Metrics &metrics)
 
 CameraCapture::~CameraCapture() {
     stop();
-    unmapBuffers();
+    unmapBuffers(main_mappings_);
+    unmapBuffers(lores_mappings_);
     requests_.clear();
     allocator_.reset();
     if (camera_) {
@@ -146,28 +147,46 @@ bool CameraCapture::allocateBuffers() {
         return false;
     }
 
-    for (const auto &buffer : allocator_->buffers(lores_stream_)) {
+    if (!mapBuffers(main_stream_, main_mappings_, "main") ||
+        !mapBuffers(lores_stream_, lores_mappings_, "lores")) {
+        return false;
+    }
+
+    if (!allocator_->buffers(main_stream_).empty()) {
+        main_layout_.planes = makeView(allocator_->buffers(main_stream_).front().get(),
+                                       main_layout_,
+                                       main_mappings_).planes;
+    }
+    if (!allocator_->buffers(lores_stream_).empty()) {
+        lores_layout_.planes = makeView(allocator_->buffers(lores_stream_).front().get(),
+                                        lores_layout_,
+                                        lores_mappings_).planes;
+    }
+    return true;
+}
+
+bool CameraCapture::mapBuffers(libcamera::Stream *stream,
+                               MappingTable &target,
+                               const char *name) {
+    for (const auto &buffer : allocator_->buffers(stream)) {
         std::vector<Mapping> mappings;
         mappings.reserve(buffer->planes().size());
         for (const auto &plane : buffer->planes()) {
             const std::size_t map_length = static_cast<std::size_t>(plane.offset) + plane.length;
             void *base = mmap(nullptr, map_length, PROT_READ, MAP_SHARED, plane.fd.get(), 0);
             if (base == MAP_FAILED) {
-                std::cerr << "[camera] lores mmap failed: " << std::strerror(errno) << '\n';
+                std::cerr << "[camera] " << name << " mmap failed: " << std::strerror(errno)
+                          << '\n';
+                for (const Mapping &mapping : mappings) {
+                    munmap(mapping.base, mapping.mapped_length);
+                }
                 return false;
             }
             mappings.push_back({base,
                                 map_length,
                                 static_cast<const std::uint8_t *>(base) + plane.offset});
         }
-        lores_mappings_.emplace(buffer.get(), std::move(mappings));
-    }
-
-    if (!allocator_->buffers(main_stream_).empty()) {
-        main_layout_.planes = makeView(allocator_->buffers(main_stream_).front().get(), false).planes;
-    }
-    if (!allocator_->buffers(lores_stream_).empty()) {
-        lores_layout_.planes = makeView(allocator_->buffers(lores_stream_).front().get(), true).planes;
+        target.emplace(buffer.get(), std::move(mappings));
     }
     return true;
 }
@@ -252,19 +271,21 @@ void CameraCapture::stop() {
     std::cout << "[camera] capture stopped\n";
 }
 
-StreamView CameraCapture::makeView(libcamera::FrameBuffer *buffer, bool mapped) const {
-    StreamView view = mapped ? lores_layout_ : main_layout_;
+StreamView CameraCapture::makeView(libcamera::FrameBuffer *buffer,
+                                   const StreamView &layout,
+                                   const MappingTable &mappings) const {
+    StreamView view = layout;
     view.planes.clear();
     const auto &planes = buffer->planes();
     const auto &metadata_planes = buffer->metadata().planes();
-    const auto mapping_it = mapped ? lores_mappings_.find(buffer) : lores_mappings_.end();
+    const auto mapping_it = mappings.find(buffer);
     for (std::size_t i = 0; i < planes.size(); ++i) {
         const auto &plane = planes[i];
         const std::uint32_t bytes_used = i < metadata_planes.size()
                                              ? metadata_planes[i].bytesused
                                              : plane.length;
         const std::uint8_t *data = nullptr;
-        if (mapped && mapping_it != lores_mappings_.end() && i < mapping_it->second.size()) {
+        if (mapping_it != mappings.end() && i < mapping_it->second.size()) {
             data = mapping_it->second[i].data;
         }
         view.planes.push_back(
@@ -302,8 +323,8 @@ void CameraCapture::onRequestCompleted(libcamera::Request *request) {
     Metrics *metrics = &metrics_;
     auto lease = std::make_shared<FrameLease>(
         request,
-        makeView(main_buffer, false),
-        makeView(lores_buffer, true),
+        makeView(main_buffer, main_layout_, main_mappings_),
+        makeView(lores_buffer, lores_layout_, lores_mappings_),
         sequence,
         timestamp,
         [weak_recycler, metrics](libcamera::Request *released) {
@@ -361,8 +382,8 @@ void CameraCapture::recyclerLoop() {
     }
 }
 
-void CameraCapture::unmapBuffers() {
-    for (auto &[buffer, mappings] : lores_mappings_) {
+void CameraCapture::unmapBuffers(MappingTable &table) {
+    for (auto &[buffer, mappings] : table) {
         (void)buffer;
         for (auto &mapping : mappings) {
             if (mapping.base && mapping.base != MAP_FAILED) {
@@ -370,7 +391,7 @@ void CameraCapture::unmapBuffers() {
             }
         }
     }
-    lores_mappings_.clear();
+    table.clear();
 }
 
 }  // namespace eggvision

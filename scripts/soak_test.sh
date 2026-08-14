@@ -4,11 +4,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 duration="${1:-1800}"
 log="${2:-soak-$(date +%Y%m%d-%H%M%S).log}"
+events_dir="${3:-/tmp/eggvision-soak-events-$(date +%Y%m%d-%H%M%S)}"
 resource_log="${log}.resources"
+app="${EGGVISION_APP:-./build/eggvision_app}"
+
+if [[ -e "$events_dir" ]]; then
+  echo "soak event path already exists: $events_dir" >&2
+  exit 1
+fi
+if [[ ! -x "$app" ]]; then
+  echo "application is not executable: $app" >&2
+  exit 1
+fi
 
 export LD_LIBRARY_PATH="/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 started_epoch="$(date +%s)"
-stdbuf -oL -eL ./build/eggvision_app --duration "$duration" >"$log" 2>&1 &
+stdbuf -oL -eL "$app" --duration "$duration" \
+  --events-dir "$events_dir" --event-min-free-bytes 1048576 >"$log" 2>&1 &
 app_pid=$!
 trap 'kill -TERM "$app_pid" 2>/dev/null || true' EXIT
 
@@ -53,4 +65,4 @@ grep -q '\[app\] stopped .*outstanding=0' "$log" || {
   echo "soak test ended without clean lease release" >&2
   exit 1
 }
-echo "soak test passed: $log (resources: $resource_log)"
+echo "soak test passed: $log (resources: $resource_log, events: $events_dir)"
