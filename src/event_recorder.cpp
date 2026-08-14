@@ -441,6 +441,9 @@ bool writeMetadata(const EventJob &job,
            << ",\n"
            << "    \"width\": " << job.snapshot.width << ",\n"
            << "    \"height\": " << job.snapshot.height << ",\n"
+           << "    \"sequence\": " << job.snapshot.sequence << ",\n"
+           << "    \"sensor_timestamp_ns\": "
+           << job.snapshot.sensor_timestamp_ns << ",\n"
            << "    \"jpeg_quality\": " << config.event_jpeg_quality << "\n"
            << "  },\n"
            << "  \"detections\": [";
