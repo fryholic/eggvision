@@ -237,15 +237,15 @@ int main(int argc, char **argv) {
                     first = test_first_sensor_timestamp_ns.load();
                 }
                 if (frame->sensorTimestampNs() >= first + test_trigger_delay_ns) {
-                    eggvision::Detection detection;
-                    detection.class_id = 0;
-                    detection.confidence = 1.0F;
-                    detection.box = {0.0F,
-                                     0.0F,
-                                     static_cast<float>(config.lores_width),
-                                     static_cast<float>(config.lores_height)};
-                    if (event_recorder.trigger(frame, {detection})) {
-                        test_event_triggered.store(true);
+                    if (!test_event_triggered.exchange(true)) {
+                        eggvision::Detection detection;
+                        detection.class_id = 0;
+                        detection.confidence = 1.0F;
+                        detection.box = {0.0F,
+                                         0.0F,
+                                         static_cast<float>(config.lores_width),
+                                         static_cast<float>(config.lores_height)};
+                        event_recorder.trigger(frame, {detection});
                     }
                 }
             }

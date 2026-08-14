@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <ctime>
 #include <deque>
 #include <filesystem>
@@ -158,6 +159,13 @@ bool writeSnapshot(const MainSnapshot &snapshot,
                    const fs::path &final_path,
                    int quality,
                    ArtifactResult &result) {
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+    if (std::getenv("EGGVISION_EVENT_TEST_FAIL_SNAPSHOT")) {
+        result.status = "failed";
+        result.error = "injected snapshot failure";
+        return false;
+    }
+#endif
     if (snapshot.i420.empty() || snapshot.width == 0 || snapshot.height == 0) {
         result.status = "failed";
         result.error = "snapshot pixels are unavailable";
@@ -220,6 +228,13 @@ bool muxVideo(const EventJob &job,
         result.error = "event video does not begin with IDR/SPS/PPS";
         return false;
     }
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+    if (std::getenv("EGGVISION_EVENT_TEST_FAIL_MUX")) {
+        result.status = "failed";
+        result.error = "injected mux failure";
+        return false;
+    }
+#endif
     for (const auto &unit : job.units) {
         if (!unit || !unit->payload || unit->payload->empty() ||
             unit->generation != job.generation) {
@@ -494,7 +509,15 @@ struct EventRecorder::Impl {
     bool accepting = false;
     std::uint64_t latest_sensor_timestamp_ns = 0;
 
-    bool storageAvailable() {
+    bool storageAvailable(bool initializing) {
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+        if (!initializing && std::getenv("EGGVISION_EVENT_TEST_REJECT_STORAGE")) {
+            metrics.event_disk_space_rejections.fetch_add(1);
+            std::cerr << "{\"type\":\"event_storage_rejected\","
+                         "\"error\":\"injected runtime storage rejection\"}\n";
+            return false;
+        }
+#endif
         std::error_code error;
         const fs::space_info space = fs::space(root, error);
         if (error || space.available < config.event_min_free_bytes) {
@@ -677,7 +700,7 @@ bool EventRecorder::initialize() {
         }
     }
     fs::remove(probe, error);
-    if (!impl_->storageAvailable()) {
+    if (!impl_->storageAvailable(true)) {
         std::cerr << "[event] storage reserve check failed during initialization\n";
         return false;
     }
@@ -726,7 +749,7 @@ bool EventRecorder::trigger(const std::shared_ptr<FrameLease> &frame,
     if (!impl_->config.event_recording_enabled || !frame || detections.empty()) {
         return false;
     }
-    if (!impl_->storageAvailable()) {
+    if (!impl_->storageAvailable(false)) {
         impl_->metrics.events_suppressed.fetch_add(1);
         return false;
     }
