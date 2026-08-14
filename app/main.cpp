@@ -33,7 +33,7 @@ void usage(const char *program) {
         << "  --mount PATH          RTSP mount (default /stream)\n"
         << "  --max-rtsp-sessions N Maximum concurrent/pending RTSP sessions (default 32)\n"
         << "  --bitrate BPS         H.264 bitrate (default 4000000)\n"
-        << "  --gop N               H.264 GOP length (default 15)\n"
+        << "  --gop N               H.264 GOP length (default 12)\n"
         << "  --confidence VALUE    person confidence threshold (default 0.30)\n"
         << "  --nms VALUE           NMS IoU threshold (default 0.45)\n"
         << "  --inference-threads N OpenVINO CPU threads (default 2)\n"

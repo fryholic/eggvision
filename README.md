@@ -98,7 +98,7 @@ export LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRAR
 --port 8554
 --mount /stream
 --bitrate 4000000
---gop 15
+--gop 12
 --confidence 0.30
 --nms 0.45
 --inference-threads 2

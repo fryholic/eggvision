@@ -18,7 +18,7 @@ struct AppConfig {
     std::string rtsp_mount = "/stream";
     unsigned rtsp_max_sessions = 32;
     unsigned bitrate = 4'000'000;
-    unsigned gop = 15;
+    unsigned gop = 12;
 
     bool inference_enabled = true;
     std::string model_path = "models/yolov5n.xml";
