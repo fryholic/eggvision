@@ -109,7 +109,8 @@ def run_case(
             environment = os.environ.copy()
             environment["G_DEBUG"] = "fatal-criticals"
             process = subprocess.Popen(
-                [str(app), "--no-inference", "--duration", str(duration)],
+                [str(app), "--no-inference", "--no-event-recording",
+                 "--duration", str(duration)],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 env=environment,

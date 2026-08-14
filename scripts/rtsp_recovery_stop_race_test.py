@@ -85,7 +85,7 @@ def run_case(app: Path, url: str, timeout: float, phase: str, iteration: int) ->
             environment["EGGVISION_RTSP_TEST_WATCHDOG_RECOVERY_DELAY_MS"] = "1500"
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
-                [str(app), "--no-inference", "--duration", "30"],
+                [str(app), "--no-inference", "--no-event-recording", "--duration", "30"],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 env=environment,

@@ -58,7 +58,7 @@ def run_start_failure(
         environment["G_DEBUG"] = "fatal-criticals"
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
-                [str(app), "--no-inference", "--duration", "5"],
+                [str(app), "--no-inference", "--no-event-recording", "--duration", "5"],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 env=environment,
@@ -115,7 +115,8 @@ def run_healthy_recovery(app: Path, url: str, duration: int, timeout: float) -> 
         environment["G_DEBUG"] = "fatal-criticals"
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
-                [str(app), "--no-inference", "--duration", str(duration)],
+                [str(app), "--no-inference", "--no-event-recording",
+                 "--duration", str(duration)],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 env=environment,
