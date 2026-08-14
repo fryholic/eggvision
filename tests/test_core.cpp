@@ -1,6 +1,6 @@
-#include "bsaps/frame.hpp"
-#include "bsaps/inference.hpp"
-#include "bsaps/latest_frame_queue.hpp"
+#include "eggvision/frame.hpp"
+#include "eggvision/inference.hpp"
+#include "eggvision/latest_frame_queue.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -27,30 +27,30 @@ bool near(float left, float right, float epsilon = 0.01F) {
 }  // namespace
 
 int main() {
-    const auto transform = bsaps::calculateLetterbox(640, 480, 320, 320);
+    const auto transform = eggvision::calculateLetterbox(640, 480, 320, 320);
     expect(near(transform.scale, 0.5F), "letterbox scale");
     expect(transform.pad_x == 0 && transform.pad_y == 40, "letterbox padding");
-    const auto restored = bsaps::restoreLetterboxBox({50, 65, 100, 50}, transform, 640, 480);
+    const auto restored = eggvision::restoreLetterboxBox({50, 65, 100, 50}, transform, 640, 480);
     expect(near(restored.x, 100) && near(restored.y, 50), "restored origin");
     expect(near(restored.width, 200) && near(restored.height, 100), "restored size");
 
-    std::vector<bsaps::Detection> detections{
+    std::vector<eggvision::Detection> detections{
         {0, 0.90F, {10, 10, 100, 100}},
         {0, 0.80F, {15, 15, 100, 100}},
         {0, 0.70F, {250, 200, 30, 50}},
     };
-    const auto nms = bsaps::nonMaximumSuppression(std::move(detections), 0.45F);
+    const auto nms = eggvision::nonMaximumSuppression(std::move(detections), 0.45F);
     expect(nms.size() == 2, "NMS suppresses overlapping lower confidence box");
     expect(near(nms.front().confidence, 0.90F), "NMS keeps highest confidence first");
 
     cv::Mat color(1, 1, CV_8UC3, cv::Scalar(10, 20, 30));
     float chw[3]{};
-    bsaps::bgrToNormalizedRgbChw(color, chw);
+    eggvision::bgrToNormalizedRgbChw(color, chw);
     expect(near(chw[0], 30.0F / 255.0F), "BGR red channel maps to RGB CHW plane 0");
     expect(near(chw[1], 20.0F / 255.0F), "BGR green channel maps to RGB CHW plane 1");
     expect(near(chw[2], 10.0F / 255.0F), "BGR blue channel maps to RGB CHW plane 2");
 
-    bsaps::LatestFrameQueue<int> queue;
+    eggvision::LatestFrameQueue<int> queue;
     expect(!queue.push(1), "first latest-frame insert is not a replacement");
     expect(queue.push(2), "second latest-frame insert replaces old frame");
     int latest = 0;
@@ -65,8 +65,8 @@ int main() {
 
     int releases = 0;
     {
-        bsaps::StreamView view;
-        auto lease = std::make_shared<bsaps::FrameLease>(
+        eggvision::StreamView view;
+        auto lease = std::make_shared<eggvision::FrameLease>(
             reinterpret_cast<libcamera::Request *>(static_cast<std::uintptr_t>(1)),
             view,
             view,

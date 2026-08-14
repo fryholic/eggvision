@@ -9,7 +9,7 @@
 #include <libcamera/framebuffer.h>
 #include <libcamera/request.h>
 
-namespace bsaps {
+namespace eggvision {
 
 struct PlaneView {
     int fd = -1;                  // Borrowed from libcamera for the lease lifetime.
@@ -67,5 +67,5 @@ private:
     Release release_;
 };
 
-}  // namespace bsaps
+}  // namespace eggvision
 

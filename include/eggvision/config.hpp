@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-namespace bsaps {
+namespace eggvision {
 
 struct AppConfig {
     unsigned main_width = 1920;
@@ -32,4 +32,4 @@ struct AppConfig {
     unsigned metrics_interval_seconds = 5;
 };
 
-}  // namespace bsaps
+}  // namespace eggvision

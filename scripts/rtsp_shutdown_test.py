@@ -103,7 +103,7 @@ def run_case(
     duration: int,
     startup_timeout: float,
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-shutdown-") as directory:
+    with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-shutdown-") as directory:
         log_path = Path(directory) / "server.log"
         with log_path.open("wb") as log_file:
             environment = os.environ.copy()
@@ -145,7 +145,7 @@ def run_case(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--duration", type=int, default=8)
     parser.add_argument("--startup-timeout", type=float, default=10.0)

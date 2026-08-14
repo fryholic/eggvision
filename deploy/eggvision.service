@@ -1,5 +1,5 @@
 [Unit]
-Description=BSAPS dual-stream camera RTSP and inference service
+Description=EggVision dual-stream camera RTSP and inference service
 After=network-online.target
 Wants=network-online.target
 
@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=pi
 Group=video
-WorkingDirectory=/home/pi/bsaps-edge-device
+WorkingDirectory=/home/pi/eggvision
 Environment=LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib
-ExecStart=/home/pi/bsaps-edge-device/build/bsaps_app
+ExecStart=/home/pi/eggvision/build/eggvision_app
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=15

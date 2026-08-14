@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(bsaps_edge_device VERSION 1.0.0 LANGUAGES CXX)
+project(eggvision VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(BSAPS_BUILD_TESTS "Build unit tests" ON)
-option(BSAPS_ENABLE_TEST_HOOKS "Enable deterministic runtime fault-injection hooks" OFF)
+option(EGGVISION_BUILD_TESTS "Build unit tests" ON)
+option(EGGVISION_ENABLE_TEST_HOOKS "Enable deterministic runtime fault-injection hooks" OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
@@ -23,18 +23,18 @@ find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn)
 find_package(Threads REQUIRED)
 
-add_library(bsaps_core
+add_library(eggvision_core
     src/camera_capture.cpp
     src/inference.cpp
     src/rtsp_server.cpp)
 
-target_include_directories(bsaps_core
+target_include_directories(eggvision_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${OpenCV_INCLUDE_DIRS})
 
-target_link_libraries(bsaps_core
+target_link_libraries(eggvision_core
     PUBLIC
         PkgConfig::LIBCAMERA
         PkgConfig::GSTREAMER
@@ -42,31 +42,31 @@ target_link_libraries(bsaps_core
         ${OpenCV_LIBS}
         Threads::Threads)
 
-target_compile_options(bsaps_core PRIVATE -Wall -Wextra -Wpedantic)
-if(BSAPS_ENABLE_TEST_HOOKS)
+target_compile_options(eggvision_core PRIVATE -Wall -Wextra -Wpedantic)
+if(EGGVISION_ENABLE_TEST_HOOKS)
     # RtspServer's test-only state is declared in a public header, so every
     # translation unit that constructs it must see the same class layout.
-    target_compile_definitions(bsaps_core PUBLIC BSAPS_ENABLE_TEST_HOOKS=1)
+    target_compile_definitions(eggvision_core PUBLIC EGGVISION_ENABLE_TEST_HOOKS=1)
 endif()
 
-add_executable(bsaps_app app/main.cpp)
-target_link_libraries(bsaps_app PRIVATE bsaps_core)
+add_executable(eggvision_app app/main.cpp)
+target_link_libraries(eggvision_app PRIVATE eggvision_core)
 
-if(BSAPS_BUILD_TESTS)
+if(EGGVISION_BUILD_TESTS)
     enable_testing()
-    add_executable(bsaps_tests tests/test_core.cpp)
-    target_link_libraries(bsaps_tests PRIVATE bsaps_core)
-    add_test(NAME bsaps_core_tests COMMAND bsaps_tests)
+    add_executable(eggvision_tests tests/test_core.cpp)
+    target_link_libraries(eggvision_tests PRIVATE eggvision_core)
+    add_test(NAME eggvision_core_tests COMMAND eggvision_tests)
 
-    add_executable(bsaps_model_smoke tests/model_smoke.cpp)
-    target_link_libraries(bsaps_model_smoke PRIVATE openvino::runtime Threads::Threads)
+    add_executable(eggvision_model_smoke tests/model_smoke.cpp)
+    target_link_libraries(eggvision_model_smoke PRIVATE openvino::runtime Threads::Threads)
 
-    if(BSAPS_ENABLE_TEST_HOOKS)
+    if(EGGVISION_ENABLE_TEST_HOOKS)
         # Hardware integration harness: run manually on a Pi with a camera.
         # It reuses one RtspServer across normal and fault-rollback epochs.
-        add_executable(bsaps_rtsp_restart_test tests/rtsp_restart_harness.cpp)
-        target_link_libraries(bsaps_rtsp_restart_test PRIVATE bsaps_core)
+        add_executable(eggvision_rtsp_restart_test tests/rtsp_restart_harness.cpp)
+        target_link_libraries(eggvision_rtsp_restart_test PRIVATE eggvision_core)
     endif()
 endif()
 
-install(TARGETS bsaps_app RUNTIME DESTINATION bin)
+install(TARGETS eggvision_app RUNTIME DESTINATION bin)

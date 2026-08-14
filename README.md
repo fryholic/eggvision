@@ -1,4 +1,4 @@
-# BSAPS Edge Device
+# EggVision
 
 Raspberry Pi 4에서 libcamera 저수준 API로 카메라 요청 하나에 두 개의 YUV420 스트림을 만들고 다음 작업을 동시에 수행한다.
 
@@ -83,7 +83,7 @@ Debug 빌드는 `-DCMAKE_BUILD_TYPE=Debug`로 분리한다.
 
 ```bash
 export LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}
-./build/bsaps_app
+./build/eggvision_app
 ```
 
 주요 옵션:
@@ -151,13 +151,13 @@ OpenVINO CPU는 `LATENCY` 모드와 2개 inference thread를 기본으로 사용
 모델과 Release 빌드를 준비한 뒤:
 
 ```bash
-sudo cp deploy/bsaps-edge-device.service /etc/systemd/system/
+sudo cp deploy/eggvision.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now bsaps-edge-device
-journalctl -u bsaps-edge-device -f
+sudo systemctl enable --now eggvision
+journalctl -u eggvision -f
 ```
 
-서비스 파일은 저장소가 `/home/pi/bsaps-edge-device`에 있다고 가정한다.
+서비스 파일은 저장소가 `/home/pi/eggvision`에 있다고 가정한다.
 
 ## 문제 해결
 
@@ -166,7 +166,7 @@ journalctl -u bsaps-edge-device -f
 - `Got 3 dmabuf but needed 1`: 같은 FD의 세 plane을 각각 GstMemory로 추가한 구현이다. 현재 코드는 하나의 memory와 세 VideoMeta offset으로 결합한다.
 - RTSP 503: `GST_DEBUG=v4l2*:6,rtspmedia:5`로 실행해 caps 고정 여부와 DMABUF import 오류를 확인한다.
 - 모델 초기화 실패: XML과 BIN이 함께 있는지, shape가 `[1,3,320,320]`/`[1,6300,85]`인지 확인한다.
-- 포트 재사용 실패: 이전 `bsaps_app` 프로세스가 남아 있는지 `ss -ltnp | grep 8554`로 확인한다.
+- 포트 재사용 실패: 이전 `eggvision_app` 프로세스가 남아 있는지 `ss -ltnp | grep 8554`로 확인한다.
 
 ## 범위 밖 기능
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify deterministic RTSP owner-thread creation failure containment.
 
-This script requires a ``-DBSAPS_ENABLE_TEST_HOOKS=ON`` build. It proves that
+This script requires a ``-DEGGVISION_ENABLE_TEST_HOOKS=ON`` build. It proves that
 recovery/cleanup owner creation failures are reported exactly once, unwind a
 partially started camera/RTSP service with no outstanding lease, and do not
 poison a subsequent healthy launch and ERROR recovery.
@@ -51,7 +51,7 @@ def run_start_failure(
     expected_recovery_failures: int,
     timeout: float,
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-thread-failure-") as directory:
+    with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-thread-failure-") as directory:
         log_path = Path(directory) / "server.log"
         environment = os.environ.copy()
         environment[hook] = "1"
@@ -106,12 +106,12 @@ def run_start_failure(
 
 
 def run_healthy_recovery(app: Path, url: str, duration: int, timeout: float) -> None:
-    with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-thread-relaunch-") as directory:
+    with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-thread-relaunch-") as directory:
         root = Path(directory)
         trigger = root / "inject-error"
         log_path = root / "server.log"
         environment = os.environ.copy()
-        environment["BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
+        environment["EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
         environment["G_DEBUG"] = "fatal-criticals"
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
@@ -177,7 +177,7 @@ def run_healthy_recovery(app: Path, url: str, duration: int, timeout: float) -> 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--duration", type=int, default=12)
     parser.add_argument("--timeout", type=float, default=12.0)
@@ -189,7 +189,7 @@ def main() -> int:
     run_start_failure(
         app,
         args.url,
-        "BSAPS_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE",
+        "EGGVISION_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE",
         "recovery thread creation failed",
         1,
         args.timeout,
@@ -197,7 +197,7 @@ def main() -> int:
     run_start_failure(
         app,
         args.url,
-        "BSAPS_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE",
+        "EGGVISION_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE",
         "session cleanup thread creation failed",
         0,
         args.timeout,

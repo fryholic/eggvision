@@ -18,7 +18,7 @@ from rtsp_session_cleanup_test import setup_only
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=10.0)
@@ -31,11 +31,11 @@ def main() -> int:
         re.IGNORECASE,
     )
     for iteration in range(1, args.iterations + 1):
-        with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-cleanup-stop-") as directory:
+        with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-cleanup-stop-") as directory:
             log_path = Path(directory) / "server.log"
             environment = os.environ.copy()
-            environment["BSAPS_RTSP_TEST_SESSION_TIMEOUT_SECONDS"] = "1"
-            environment["BSAPS_RTSP_TEST_SESSION_CLEANUP_DELAY_MS"] = "5000"
+            environment["EGGVISION_RTSP_TEST_SESSION_TIMEOUT_SECONDS"] = "1"
+            environment["EGGVISION_RTSP_TEST_SESSION_CLEANUP_DELAY_MS"] = "5000"
             environment["G_DEBUG"] = "fatal-criticals"
             with log_path.open("wb") as log_file:
                 process = subprocess.Popen(

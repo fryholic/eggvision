@@ -70,19 +70,19 @@ def validate(log: str, code: int, phase: str, iteration: int) -> None:
 
 
 def run_case(app: Path, url: str, timeout: float, phase: str, iteration: int) -> None:
-    with tempfile.TemporaryDirectory(prefix=f"bsaps-rtsp-{phase}-stop-") as directory:
+    with tempfile.TemporaryDirectory(prefix=f"eggvision-rtsp-{phase}-stop-") as directory:
         root = Path(directory)
         trigger = root / "inject-error"
         pause = root / "pause-recovery"
         log_path = root / "server.log"
         environment = os.environ.copy()
-        environment["BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
+        environment["EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
         environment["G_DEBUG"] = "fatal-criticals"
         if phase == "pending":
             pause.touch()
-            environment["BSAPS_RTSP_TEST_RECOVERY_PAUSE"] = str(pause)
+            environment["EGGVISION_RTSP_TEST_RECOVERY_PAUSE"] = str(pause)
         else:
-            environment["BSAPS_RTSP_TEST_WATCHDOG_RECOVERY_DELAY_MS"] = "1500"
+            environment["EGGVISION_RTSP_TEST_WATCHDOG_RECOVERY_DELAY_MS"] = "1500"
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
                 [str(app), "--no-inference", "--duration", "30"],
@@ -116,7 +116,7 @@ def run_case(app: Path, url: str, timeout: float, phase: str, iteration: int) ->
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=10.0)

@@ -18,7 +18,7 @@ from rtsp_recovery_stop_race_test import wait_for_log
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path, default=Path("./build/bsaps_app"))
+    parser.add_argument("--app", type=Path, default=Path("./build/eggvision_app"))
     parser.add_argument("--url", default="rtsp://127.0.0.1:8554/stream")
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--duration", type=int, default=30)
@@ -43,13 +43,13 @@ def main() -> int:
         re.IGNORECASE,
     )
     for iteration in range(1, args.iterations + 1):
-        with tempfile.TemporaryDirectory(prefix="bsaps-rtsp-stop-overlap-") as directory:
+        with tempfile.TemporaryDirectory(prefix="eggvision-rtsp-stop-overlap-") as directory:
             root = Path(directory)
             trigger = root / "inject-error"
             log_path = root / "server.log"
             environment = os.environ.copy()
-            environment["BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
-            environment["BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS"] = str(args.teardown_delay_ms)
+            environment["EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER"] = str(trigger)
+            environment["EGGVISION_RTSP_TEST_TEARDOWN_DELAY_MS"] = str(args.teardown_delay_ms)
             environment["G_DEBUG"] = "fatal-criticals"
             with log_path.open("wb") as log_file:
                 process = subprocess.Popen(

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "bsaps/config.hpp"
-#include "bsaps/frame.hpp"
-#include "bsaps/latest_frame_queue.hpp"
-#include "bsaps/metrics.hpp"
+#include "eggvision/config.hpp"
+#include "eggvision/frame.hpp"
+#include "eggvision/latest_frame_queue.hpp"
+#include "eggvision/metrics.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -17,7 +17,7 @@
 #include <gst/gst.h>
 #include <gst/rtsp-server/rtsp-server.h>
 
-namespace bsaps {
+namespace eggvision {
 
 class RtspServer {
 public:
@@ -34,7 +34,7 @@ public:
     // A stalled teardown is reported periodically and keeps blocking safely.
     void stop();
     std::string url(const std::string &host) const;
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
     bool recoveryRunningForTest() const;
     bool runningForTest() const { return running_.load(std::memory_order_acquire); }
 #endif
@@ -165,7 +165,7 @@ private:
     std::shared_ptr<RecoveryJob> recovery_job_;
     GstRTSPMediaStatus observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
     gint64 status_since_us_ = 0;
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
     std::string test_push_error_trigger_;
     unsigned test_push_errors_remaining_ = 0;
     bool test_push_error_consumed_ = false;
@@ -182,4 +182,4 @@ private:
 #endif
 };
 
-}  // namespace bsaps
+}  // namespace eggvision

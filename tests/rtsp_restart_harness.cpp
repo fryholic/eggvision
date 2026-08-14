@@ -1,7 +1,7 @@
-#include "bsaps/camera_capture.hpp"
-#include "bsaps/config.hpp"
-#include "bsaps/metrics.hpp"
-#include "bsaps/rtsp_server.hpp"
+#include "eggvision/camera_capture.hpp"
+#include "eggvision/config.hpp"
+#include "eggvision/metrics.hpp"
+#include "eggvision/rtsp_server.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -91,10 +91,10 @@ void stopRtp(GstElement *pipeline) {
 
 void configureFailure(const std::string &stage) {
     constexpr const char *variables[] = {
-        "BSAPS_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE",
-        "BSAPS_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE",
-        "BSAPS_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE",
-        "BSAPS_RTSP_TEST_FAIL_LOOP_THREAD_CREATE",
+        "EGGVISION_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE",
+        "EGGVISION_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE",
+        "EGGVISION_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE",
+        "EGGVISION_RTSP_TEST_FAIL_LOOP_THREAD_CREATE",
     };
     for (const char *variable : variables) {
         g_unsetenv(variable);
@@ -147,29 +147,29 @@ int main(int argc, char **argv) {
         }
         configureFailure(failure_stage);
         const std::string recovery_trigger =
-            "/tmp/bsaps-rtsp-restart-" + port + ".trigger";
+            "/tmp/eggvision-rtsp-restart-" + port + ".trigger";
         std::remove(recovery_trigger.c_str());
         if (delayed_recovery_ms != 0) {
-            g_setenv("BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER", recovery_trigger.c_str(), TRUE);
-            g_setenv("BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS",
+            g_setenv("EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER", recovery_trigger.c_str(), TRUE);
+            g_setenv("EGGVISION_RTSP_TEST_TEARDOWN_DELAY_MS",
                      std::to_string(delayed_recovery_ms).c_str(),
                      TRUE);
         } else {
-            g_unsetenv("BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER");
-            g_unsetenv("BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS");
+            g_unsetenv("EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER");
+            g_unsetenv("EGGVISION_RTSP_TEST_TEARDOWN_DELAY_MS");
         }
 
-        bsaps::AppConfig config;
+        eggvision::AppConfig config;
         config.inference_enabled = false;
         config.rtsp_address = "127.0.0.1";
         config.rtsp_port = port;
-        bsaps::Metrics metrics;
-        bsaps::RtspServer server(config, metrics);
-        bsaps::CameraCapture camera(config, metrics);
+        eggvision::Metrics metrics;
+        eggvision::RtspServer server(config, metrics);
+        eggvision::CameraCapture camera(config, metrics);
         if (!camera.initialize()) {
             throw std::runtime_error("camera initialization failed");
         }
-        camera.setMainConsumer([&server](std::shared_ptr<bsaps::FrameLease> frame) {
+        camera.setMainConsumer([&server](std::shared_ptr<eggvision::FrameLease> frame) {
             server.submit(std::move(frame));
         });
         if (!camera.start()) {

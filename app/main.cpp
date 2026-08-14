@@ -1,8 +1,8 @@
-#include "bsaps/camera_capture.hpp"
-#include "bsaps/config.hpp"
-#include "bsaps/inference.hpp"
-#include "bsaps/metrics.hpp"
-#include "bsaps/rtsp_server.hpp"
+#include "eggvision/camera_capture.hpp"
+#include "eggvision/config.hpp"
+#include "eggvision/inference.hpp"
+#include "eggvision/metrics.hpp"
+#include "eggvision/rtsp_server.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -38,8 +38,8 @@ void usage(const char *program) {
         << "  --help                show this help\n";
 }
 
-bsaps::AppConfig parseArguments(int argc, char **argv) {
-    bsaps::AppConfig config;
+eggvision::AppConfig parseArguments(int argc, char **argv) {
+    eggvision::AppConfig config;
     auto value = [&](int &index) -> std::string {
         if (++index >= argc) {
             throw std::runtime_error(std::string("missing value after ") + argv[index - 1]);
@@ -91,7 +91,7 @@ bsaps::AppConfig parseArguments(int argc, char **argv) {
     return config;
 }
 
-void printConfiguration(const bsaps::AppConfig &config) {
+void printConfiguration(const eggvision::AppConfig &config) {
     std::cout << "[config] main=" << config.main_width << 'x' << config.main_height
               << " lores=" << config.lores_width << 'x' << config.lores_height
               << " fps=" << config.fps << " buffers=" << config.buffer_count
@@ -112,21 +112,21 @@ int main(int argc, char **argv) {
     std::signal(SIGTERM, signalHandler);
 
     try {
-        const bsaps::AppConfig config = parseArguments(argc, argv);
+        const eggvision::AppConfig config = parseArguments(argc, argv);
         printConfiguration(config);
-        bsaps::Metrics metrics;
-        bsaps::RtspServer rtsp(config, metrics);
-        bsaps::InferenceWorker inference(config, metrics);
-        bsaps::CameraCapture camera(config, metrics);
+        eggvision::Metrics metrics;
+        eggvision::RtspServer rtsp(config, metrics);
+        eggvision::InferenceWorker inference(config, metrics);
+        eggvision::CameraCapture camera(config, metrics);
 
         if (!inference.initialize() || !camera.initialize()) {
             return 2;
         }
-        camera.setMainConsumer([&rtsp](std::shared_ptr<bsaps::FrameLease> frame) {
+        camera.setMainConsumer([&rtsp](std::shared_ptr<eggvision::FrameLease> frame) {
             rtsp.submit(std::move(frame));
         });
         if (config.inference_enabled) {
-            camera.setInferenceConsumer([&inference](std::shared_ptr<bsaps::FrameLease> frame) {
+            camera.setInferenceConsumer([&inference](std::shared_ptr<eggvision::FrameLease> frame) {
                 inference.submit(std::move(frame));
             });
         }

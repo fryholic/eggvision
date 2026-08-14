@@ -1,4 +1,4 @@
-#include "bsaps/rtsp_server.hpp"
+#include "eggvision/rtsp_server.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,11 +13,11 @@
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/video/video.h>
 
-namespace bsaps {
+namespace eggvision {
 namespace {
 
 GQuark leaseQuark() {
-    static const GQuark quark = g_quark_from_static_string("bsaps-frame-lease");
+    static const GQuark quark = g_quark_from_static_string("eggvision-frame-lease");
     return quark;
 }
 
@@ -104,14 +104,14 @@ void RtspServer::destroySourceCallbackData(gpointer data) {
 RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
     : config_(config), metrics_(metrics), callback_state_(std::make_shared<CallbackState>()) {
     callback_state_->server = this;
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
     // This hook is compiled out of normal builds. Test builds opt in through
-    // BSAPS_ENABLE_TEST_HOOKS and still remain inert unless the trigger path is
+    // EGGVISION_ENABLE_TEST_HOOKS and still remain inert unless the trigger path is
     // explicitly supplied in the environment.
-    if (const gchar *trigger = g_getenv("BSAPS_RTSP_TEST_PUSH_ERROR_TRIGGER")) {
+    if (const gchar *trigger = g_getenv("EGGVISION_RTSP_TEST_PUSH_ERROR_TRIGGER")) {
         test_push_error_trigger_ = trigger;
     }
-    if (const gchar *delay = g_getenv("BSAPS_RTSP_TEST_TEARDOWN_DELAY_MS")) {
+    if (const gchar *delay = g_getenv("EGGVISION_RTSP_TEST_TEARDOWN_DELAY_MS")) {
         gchar *end = nullptr;
         const guint64 parsed = g_ascii_strtoull(delay, &end, 10);
         if (end != delay && end && *end == '\0') {
@@ -131,22 +131,22 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
                    : 0U;
     };
     test_watchdog_recovery_delay_ms_ =
-        parse_test_unsigned("BSAPS_RTSP_TEST_WATCHDOG_RECOVERY_DELAY_MS");
-    if (const gchar *pause = g_getenv("BSAPS_RTSP_TEST_RECOVERY_PAUSE")) {
+        parse_test_unsigned("EGGVISION_RTSP_TEST_WATCHDOG_RECOVERY_DELAY_MS");
+    if (const gchar *pause = g_getenv("EGGVISION_RTSP_TEST_RECOVERY_PAUSE")) {
         test_recovery_pause_path_ = pause;
     }
     test_session_timeout_seconds_ =
-        parse_test_unsigned("BSAPS_RTSP_TEST_SESSION_TIMEOUT_SECONDS");
+        parse_test_unsigned("EGGVISION_RTSP_TEST_SESSION_TIMEOUT_SECONDS");
     test_session_cleanup_delay_ms_ =
-        parse_test_unsigned("BSAPS_RTSP_TEST_SESSION_CLEANUP_DELAY_MS");
+        parse_test_unsigned("EGGVISION_RTSP_TEST_SESSION_CLEANUP_DELAY_MS");
     test_fail_recovery_thread_create_ =
-        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE"), "1") == 0;
+        g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_RECOVERY_THREAD_CREATE"), "1") == 0;
     test_fail_cleanup_thread_create_ =
-        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE"), "1") == 0;
+        g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_CLEANUP_THREAD_CREATE"), "1") == 0;
     test_fail_feeder_thread_create_ =
-        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE"), "1") == 0;
+        g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE"), "1") == 0;
     test_fail_loop_thread_create_ =
-        g_strcmp0(g_getenv("BSAPS_RTSP_TEST_FAIL_LOOP_THREAD_CREATE"), "1") == 0;
+        g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_LOOP_THREAD_CREATE"), "1") == 0;
 #endif
     gst_init(nullptr, nullptr);
 }
@@ -301,7 +301,7 @@ bool RtspServer::start() {
         recovery_job_.reset();
         observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
         status_since_us_ = g_get_monotonic_time();
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         test_push_errors_remaining_ = 0;
         test_push_error_consumed_ = false;
         test_recovery_pause_reported_ = false;
@@ -370,7 +370,7 @@ bool RtspServer::start() {
         watchdog_source_ = watchdog;
     }
     try {
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (test_fail_feeder_thread_create_) {
             test_fail_feeder_thread_create_ = false;
             throw std::system_error(
@@ -379,7 +379,7 @@ bool RtspServer::start() {
         }
 #endif
         feeder_thread_ = std::thread(&RtspServer::feederLoop, this);
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (test_fail_loop_thread_create_) {
             test_fail_loop_thread_create_ = false;
             throw std::system_error(
@@ -496,7 +496,7 @@ gboolean RtspServer::cleanupSessions(GstRTSPSessionPool *pool, gpointer user_dat
     if (!state || state->stopping.load(std::memory_order_acquire)) {
         return G_SOURCE_REMOVE;
     }
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
     if (!state->test_delay_consumed && state->test_delay_ms != 0) {
         state->test_delay_consumed = true;
         std::cerr << "[rtsp] test hook delaying session cleanup by "
@@ -527,7 +527,7 @@ void RtspServer::onClientConnected(GstRTSPClient *client) {
 }
 
 void RtspServer::onClientNewSession(GstRTSPSession *session) {
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
     if (test_session_timeout_seconds_ != 0) {
         gst_rtsp_session_set_timeout(session, test_session_timeout_seconds_);
         g_object_set(session, "extra-timeout", 0U, nullptr);
@@ -572,7 +572,7 @@ bool RtspServer::startSessionCleanup() {
     state->context = g_main_context_new();
     state->loop = state->context ? g_main_loop_new(state->context, FALSE) : nullptr;
     state->max_sessions = config_.rtsp_max_sessions;
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
     state->test_delay_ms = test_session_cleanup_delay_ms_;
 #endif
     if (!state->pool || !state->context || !state->loop) {
@@ -608,7 +608,7 @@ bool RtspServer::startSessionCleanup() {
     }
     std::thread owner;
     try {
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (test_fail_cleanup_thread_create_) {
             test_fail_cleanup_thread_create_ = false;
             throw std::system_error(
@@ -655,7 +655,7 @@ bool RtspServer::startSessionCleanup() {
 bool RtspServer::startRecoveryWorker() {
     try {
         auto state = std::make_shared<RecoveryWorkerState>();
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (test_fail_recovery_thread_create_) {
             test_fail_recovery_thread_create_ = false;
             throw std::system_error(
@@ -1138,7 +1138,7 @@ gboolean RtspServer::onWatchdog() {
     }
 
     if (recovery_generation != 0) {
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (!test_recovery_pause_path_.empty() &&
             access(test_recovery_pause_path_.c_str(), F_OK) == 0) {
             if (!test_recovery_pause_reported_) {
@@ -1240,7 +1240,7 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
                 job->factory = current_factory_
                                    ? GST_RTSP_MEDIA_FACTORY(g_object_ref(current_factory_))
                                    : nullptr;
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
                 job->teardown_delay_ms = test_teardown_delay_ms_;
 #endif
                 recovery_job_ = job;
@@ -1536,7 +1536,7 @@ void RtspServer::feederLoop() {
             gst_object_unref(source);
             continue;
         }
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (!test_push_error_consumed_ && !test_push_error_trigger_.empty() &&
             access(test_push_error_trigger_.c_str(), F_OK) == 0) {
             test_push_error_consumed_ = true;
@@ -1798,7 +1798,7 @@ std::string RtspServer::url(const std::string &host) const {
     return "rtsp://" + host + ':' + config_.rtsp_port + config_.rtsp_mount;
 }
 
-#ifdef BSAPS_ENABLE_TEST_HOOKS
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
 bool RtspServer::recoveryRunningForTest() const {
     std::lock_guard<std::mutex> lock(source_mutex_);
     return recovery_state_ == RecoveryState::Running && recovery_job_ &&
@@ -1806,4 +1806,4 @@ bool RtspServer::recoveryRunningForTest() const {
 }
 #endif
 
-}  // namespace bsaps
+}  // namespace eggvision
