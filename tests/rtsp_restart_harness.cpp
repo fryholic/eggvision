@@ -147,6 +147,10 @@ int main(int argc, char **argv) {
                 "epoch count must be positive and delayed recovery requires two epochs");
         }
         configureFailure(failure_stage);
+        // Force every new RTSP/encoder generation to discard one IDR and the
+        // following delta AUs. This deterministically exercises the feeder's
+        // awaiting-keyframe early-continue path.
+        g_setenv("EGGVISION_RTSP_TEST_FORCE_INITIAL_KEYFRAME_DROP", "1", TRUE);
         const std::string recovery_trigger =
             "/tmp/eggvision-rtsp-restart-" + port + ".trigger";
         std::remove(recovery_trigger.c_str());
@@ -310,6 +314,17 @@ int main(int argc, char **argv) {
         camera.stop();
         encoder.stop();
         server.stop();
+        if (!waitUntil(
+                [&server] {
+                    const auto bound = server.appsrcBoundForTest();
+                    return bound > 0 && server.appsrcDestroyedForTest() == bound;
+                },
+                std::chrono::seconds(5))) {
+            throw std::runtime_error(
+                "GstAppSrc lifetime leak: bound=" +
+                std::to_string(server.appsrcBoundForTest()) +
+                " destroyed=" + std::to_string(server.appsrcDestroyedForTest()));
+        }
         if (metrics.outstanding_leases.load() != 0) {
             throw std::runtime_error("outstanding leases remain: " +
                                      std::to_string(metrics.outstanding_leases.load()));
@@ -317,6 +332,8 @@ int main(int argc, char **argv) {
         std::cout << "[restart-test] passed stage=" << failure_stage
                   << " successful_epochs=" << successful_epochs
                   << " delayed_recovery_ms=" << delayed_recovery_ms
+                  << " appsrc_bound=" << server.appsrcBoundForTest()
+                  << " appsrc_destroyed=" << server.appsrcDestroyedForTest()
                   << " outstanding=0 rtsp_errors=" << metrics.rtsp_errors.load()
                   << " recovery_failures=" << metrics.rtsp_recovery_failures.load() << '\n';
         return 0;

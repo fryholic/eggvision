@@ -12,6 +12,16 @@
 namespace eggvision {
 namespace {
 
+struct GstAppSrcUnref {
+    void operator()(GstAppSrc *source) const {
+        if (source) {
+            gst_object_unref(source);
+        }
+    }
+};
+
+using GstAppSrcRef = std::unique_ptr<GstAppSrc, GstAppSrcUnref>;
+
 void destroyEncodedUnit(gpointer data) {
     delete static_cast<EncodedAccessUnitPtr *>(data);
 }
@@ -96,6 +106,7 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
     : config_(config), metrics_(metrics), callback_state_(std::make_shared<CallbackState>()) {
     callback_state_->server = this;
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
+    test_appsrc_lifetime_ = std::make_shared<TestAppSrcLifetimeState>();
     // This hook is compiled out of normal builds. Test builds opt in through
     // EGGVISION_ENABLE_TEST_HOOKS and still remain inert unless the trigger path is
     // explicitly supplied in the environment.
@@ -138,6 +149,8 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
         g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_FEEDER_THREAD_CREATE"), "1") == 0;
     test_fail_loop_thread_create_ =
         g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FAIL_LOOP_THREAD_CREATE"), "1") == 0;
+    test_force_initial_keyframe_drop_ =
+        g_strcmp0(g_getenv("EGGVISION_RTSP_TEST_FORCE_INITIAL_KEYFRAME_DROP"), "1") == 0;
 #endif
     gst_init(nullptr, nullptr);
 }
@@ -145,6 +158,22 @@ RtspServer::RtspServer(const AppConfig &config, Metrics &metrics)
 RtspServer::~RtspServer() {
     stop();
 }
+
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+void RtspServer::testAppSrcDestroyed(gpointer data, GObject *) {
+    auto *state = static_cast<std::shared_ptr<TestAppSrcLifetimeState> *>(data);
+    (*state)->destroyed.fetch_add(1, std::memory_order_release);
+    delete state;
+}
+
+std::uint64_t RtspServer::appsrcBoundForTest() const {
+    return test_appsrc_lifetime_->bound.load(std::memory_order_acquire);
+}
+
+std::uint64_t RtspServer::appsrcDestroyedForTest() const {
+    return test_appsrc_lifetime_->destroyed.load(std::memory_order_acquire);
+}
+#endif
 
 GSource *RtspServer::createListenerSource() {
     if (!server_) {
@@ -845,6 +874,13 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
         } else if (appsrc_ != GST_APP_SRC(source)) {
             previous = appsrc_;
             appsrc_ = GST_APP_SRC(source);  // gst_bin_get_by_name supplied this reference.
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+            test_appsrc_lifetime_->bound.fetch_add(1, std::memory_order_release);
+            g_object_weak_ref(
+                G_OBJECT(source),
+                RtspServer::testAppSrcDestroyed,
+                new std::shared_ptr<TestAppSrcLifetimeState>(test_appsrc_lifetime_));
+#endif
             generation_.fetch_add(1);
             changed = true;
         }
@@ -1389,13 +1425,16 @@ void RtspServer::feederLoop() {
     std::uint64_t frame_index = 0;
     std::uint64_t observed_encoder_generation = 0;
     bool awaiting_keyframe = true;
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+    bool force_initial_keyframe_drop = false;
+#endif
     while (running_.load()) {
         EncodedAccessUnitPtr unit;
         if (!latest_.waitPop(unit)) {
             break;
         }
 
-        GstAppSrc *source = nullptr;
+        GstAppSrcRef source;
         std::uint64_t generation = 0;
         std::uint64_t media_generation = 0;
         {
@@ -1403,7 +1442,7 @@ void RtspServer::feederLoop() {
             generation = generation_.load();
             media_generation = media_generation_;
             if (appsrc_) {
-                source = GST_APP_SRC(gst_object_ref(appsrc_));
+                source.reset(GST_APP_SRC(gst_object_ref(appsrc_)));
             }
         }
         if (!source) {
@@ -1416,9 +1455,20 @@ void RtspServer::feederLoop() {
             observed_encoder_generation = unit->generation;
             frame_index = 0;
             awaiting_keyframe = true;
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+            force_initial_keyframe_drop = test_force_initial_keyframe_drop_;
+#endif
         }
         if (awaiting_keyframe) {
-            if (!unit->independentlyDecodable()) {
+            bool independently_decodable = unit->independentlyDecodable();
+#ifdef EGGVISION_ENABLE_TEST_HOOKS
+            if (independently_decodable && force_initial_keyframe_drop) {
+                force_initial_keyframe_drop = false;
+                independently_decodable = false;
+                std::cout << "[rtsp] test hook discarding initial keyframe\n";
+            }
+#endif
+            if (!independently_decodable) {
                 metrics_.rtsp_dropped.fetch_add(1);
                 continue;
             }
@@ -1428,7 +1478,6 @@ void RtspServer::feederLoop() {
         GstBuffer *buffer = makeBuffer(std::move(unit), frame_index++);
         if (!buffer) {
             metrics_.rtsp_errors.fetch_add(1);
-            gst_object_unref(source);
             continue;
         }
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
@@ -1444,12 +1493,11 @@ void RtspServer::feederLoop() {
             gst_buffer_unref(buffer);
             flow = GST_FLOW_ERROR;
         } else {
-            flow = gst_app_src_push_buffer(source, buffer);
+            flow = gst_app_src_push_buffer(source.get(), buffer);
         }
 #else
-        const GstFlowReturn flow = gst_app_src_push_buffer(source, buffer);
+        const GstFlowReturn flow = gst_app_src_push_buffer(source.get(), buffer);
 #endif
-        gst_object_unref(source);
         if (flow == GST_FLOW_OK) {
             metrics_.rtsp_pushed.fetch_add(1);
             std::lock_guard<std::mutex> lock(source_mutex_);

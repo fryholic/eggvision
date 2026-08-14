@@ -37,6 +37,8 @@ public:
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
     bool recoveryRunningForTest() const;
     bool runningForTest() const { return running_.load(std::memory_order_acquire); }
+    std::uint64_t appsrcBoundForTest() const;
+    std::uint64_t appsrcDestroyedForTest() const;
 #endif
 
 private:
@@ -164,6 +166,11 @@ private:
     GstRTSPMediaStatus observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARED;
     gint64 status_since_us_ = 0;
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
+    struct TestAppSrcLifetimeState {
+        std::atomic<std::uint64_t> bound{0};
+        std::atomic<std::uint64_t> destroyed{0};
+    };
+    static void testAppSrcDestroyed(gpointer data, GObject *object);
     std::string test_push_error_trigger_;
     unsigned test_push_errors_remaining_ = 0;
     bool test_push_error_consumed_ = false;
@@ -177,6 +184,8 @@ private:
     bool test_fail_cleanup_thread_create_ = false;
     bool test_fail_feeder_thread_create_ = false;
     bool test_fail_loop_thread_create_ = false;
+    bool test_force_initial_keyframe_drop_ = false;
+    std::shared_ptr<TestAppSrcLifetimeState> test_appsrc_lifetime_;
 #endif
 };
 
