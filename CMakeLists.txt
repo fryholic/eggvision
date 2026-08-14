@@ -29,7 +29,8 @@ add_library(eggvision_core
     src/h264_bitstream.cpp
     src/h264_encoder.cpp
     src/inference.cpp
-    src/rtsp_server.cpp)
+    src/rtsp_server.cpp
+    src/snapshot.cpp)
 
 target_include_directories(eggvision_core
     PUBLIC
@@ -73,6 +74,9 @@ if(EGGVISION_BUILD_TESTS)
         # It reuses one RtspServer across normal and fault-rollback epochs.
         add_executable(eggvision_rtsp_restart_test tests/rtsp_restart_harness.cpp)
         target_link_libraries(eggvision_rtsp_restart_test PRIVATE eggvision_core)
+
+        add_executable(eggvision_snapshot_test tests/snapshot_harness.cpp)
+        target_link_libraries(eggvision_snapshot_test PRIVATE eggvision_core)
     endif()
 endif()
 

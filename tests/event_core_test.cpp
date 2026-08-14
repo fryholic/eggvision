@@ -1,5 +1,6 @@
 #include "eggvision/encoded_ring_buffer.hpp"
 #include "eggvision/h264_bitstream.hpp"
+#include "eggvision/snapshot.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -155,6 +156,37 @@ void testH264AnnexBInspection() {
            "Annex B parser does not promote a delta slice");
 }
 
+void testMappedI420StrideCopy() {
+    eggvision::StreamView view;
+    view.width = 4;
+    view.height = 4;
+    view.stride = 8;
+    std::vector<std::uint8_t> y{
+        1, 2, 3, 4, 90, 90, 90, 90,
+        5, 6, 7, 8, 90, 90, 90, 90,
+        9, 10, 11, 12, 90, 90, 90, 90,
+        13, 14, 15, 16, 90, 90, 90, 90,
+    };
+    std::vector<std::uint8_t> u{17, 18, 90, 90, 19, 20, 90, 90};
+    std::vector<std::uint8_t> v{21, 22, 90, 90, 23, 24, 90, 90};
+    view.planes = {
+        {-1, 0, static_cast<std::uint32_t>(y.size()),
+         static_cast<std::uint32_t>(y.size()), y.data()},
+        {-1, 0, static_cast<std::uint32_t>(u.size()),
+         static_cast<std::uint32_t>(u.size()), u.data()},
+        {-1, 0, static_cast<std::uint32_t>(v.size()),
+         static_cast<std::uint32_t>(v.size()), v.data()},
+    };
+    std::vector<std::uint8_t> packed;
+    std::string error;
+    expect(eggvision::copyMappedI420(view, packed, error), "mapped I420 copy succeeds");
+    const std::vector<std::uint8_t> expected{
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+        17, 18, 19, 20, 21, 22, 23, 24,
+    };
+    expect(packed == expected, "mapped I420 copy removes luma and chroma stride padding");
+}
+
 }  // namespace
 
 int main() {
@@ -165,6 +197,7 @@ int main() {
     testTimeRetentionKeepsBoundaryKeyframe();
     testByteLimitAndInvalidUnits();
     testH264AnnexBInspection();
+    testMappedI420StrideCopy();
 
     if (failures == 0) {
         std::cout << "all event core tests passed\n";
