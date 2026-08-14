@@ -20,12 +20,13 @@ pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
 # The Raspberry Pi image installs these config packages outside the default path.
 list(APPEND CMAKE_PREFIX_PATH "/usr/local/runtime/cmake" "/usr/local/lib/cmake/opencv4")
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
 find_package(Threads REQUIRED)
 
 add_library(eggvision_core
     src/camera_capture.cpp
     src/encoded_ring_buffer.cpp
+    src/event_recorder.cpp
     src/h264_bitstream.cpp
     src/h264_encoder.cpp
     src/inference.cpp
@@ -77,6 +78,9 @@ if(EGGVISION_BUILD_TESTS)
 
         add_executable(eggvision_snapshot_test tests/snapshot_harness.cpp)
         target_link_libraries(eggvision_snapshot_test PRIVATE eggvision_core)
+
+        add_executable(eggvision_event_recording_test tests/event_recording_harness.cpp)
+        target_link_libraries(eggvision_event_recording_test PRIVATE eggvision_core)
     endif()
 endif()
 

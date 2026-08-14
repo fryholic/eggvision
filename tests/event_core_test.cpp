@@ -1,9 +1,11 @@
 #include "eggvision/encoded_ring_buffer.hpp"
+#include "eggvision/event_recorder.hpp"
 #include "eggvision/h264_bitstream.hpp"
 #include "eggvision/snapshot.hpp"
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -187,6 +189,25 @@ void testMappedI420StrideCopy() {
     expect(packed == expected, "mapped I420 copy removes luma and chroma stride padding");
 }
 
+void testEventGateSuppressionBoundaries() {
+    eggvision::EventGate gate(10'000);
+    expect(gate.stateAt(1'000) == eggvision::EventState::Idle,
+           "event gate begins idle");
+    expect(gate.tryBegin(1'000), "event gate accepts the first trigger");
+    expect(gate.stateAt(1'500) == eggvision::EventState::CollectingPostRoll,
+           "event gate reports post-roll collection");
+    expect(!gate.tryBegin(1'500), "event gate suppresses a trigger while collecting");
+    gate.complete(2'000);
+    expect(gate.cooldownUntilNs() == 12'000, "cooldown begins at the actual clip end");
+    expect(gate.stateAt(11'999) == eggvision::EventState::Cooldown,
+           "event gate remains in cooldown before the exact boundary");
+    expect(!gate.tryBegin(11'999), "event gate suppresses a trigger inside cooldown");
+    expect(gate.tryBegin(12'000), "event gate accepts a trigger at the cooldown boundary");
+    gate.complete(std::numeric_limits<std::uint64_t>::max() - 5);
+    expect(gate.cooldownUntilNs() == std::numeric_limits<std::uint64_t>::max(),
+           "cooldown timestamp addition saturates instead of overflowing");
+}
+
 }  // namespace
 
 int main() {
@@ -198,6 +219,7 @@ int main() {
     testByteLimitAndInvalidUnits();
     testH264AnnexBInspection();
     testMappedI420StrideCopy();
+    testEventGateSuppressionBoundaries();
 
     if (failures == 0) {
         std::cout << "all event core tests passed\n";

@@ -28,6 +28,17 @@ struct AppConfig {
     unsigned inference_height = 320;
     unsigned inference_threads = 2;
 
+    bool event_recording_enabled = true;
+    std::string events_dir = "/var/lib/eggvision/events";
+    double event_pre_seconds = 1.5;
+    double event_post_seconds = 1.5;
+    double event_cooldown_seconds = 10.0;
+    double event_ring_seconds = 4.0;
+    std::uint64_t event_ring_max_bytes = 8ULL * 1024ULL * 1024ULL;
+    std::uint64_t event_min_free_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+    int event_jpeg_quality = 90;
+    std::string event_container = "mp4";
+
     unsigned duration_seconds = 0;
     unsigned metrics_interval_seconds = 5;
 };

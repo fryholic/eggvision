@@ -25,6 +25,17 @@ struct Metrics {
     std::atomic<std::uint64_t> inference_dropped{0};
     std::atomic<std::uint64_t> detected_persons{0};
     std::atomic<std::uint64_t> inference_total_us{0};
+    std::atomic<std::uint64_t> events_triggered{0};
+    std::atomic<std::uint64_t> events_suppressed{0};
+    std::atomic<std::uint64_t> events_completed{0};
+    std::atomic<std::uint64_t> events_partial_preroll{0};
+    std::atomic<std::uint64_t> events_partial_postroll{0};
+    std::atomic<std::uint64_t> events_failed{0};
+    std::atomic<std::uint64_t> event_video_bytes{0};
+    std::atomic<std::uint64_t> event_snapshot_bytes{0};
+    std::atomic<std::uint64_t> event_mux_errors{0};
+    std::atomic<std::uint64_t> event_snapshot_errors{0};
+    std::atomic<std::uint64_t> event_disk_space_rejections{0};
 };
 
 }  // namespace eggvision
