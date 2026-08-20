@@ -84,9 +84,10 @@ ctest --test-dir build --output-on-failure
 
 Debug 빌드는 `-DCMAKE_BUILD_TYPE=Debug`로 분리한다.
 
-Raspberry Pi 4 전용 바이너리에서는 Cortex-A72 비용 모델과 명령 스케줄링을
-사용하도록 다음 옵션을 추가할 수 있다. 기본값은 `OFF`이며, 다른 CPU에서도
-실행해야 하는 범용 AArch64 바이너리에는 사용하지 않는다.
+Raspberry Pi 4에서는 Cortex-A72 비용 모델과 명령 스케줄링을 사용하도록 다음
+옵션을 추가할 수 있다. `-mtune=cortex-a72`만 EggVision core에 적용하므로 범용
+AArch64 명령어 호환성은 유지된다. 기본값은 `OFF`이며 실제 workload에서 성능을
+확인한 뒤 활성화한다.
 
 ```bash
 cmake -S . -B build-pi4 \
