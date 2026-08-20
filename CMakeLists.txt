@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(EGGVISION_BUILD_TESTS "Build unit tests" ON)
 option(EGGVISION_ENABLE_TEST_HOOKS "Enable deterministic runtime fault-injection hooks" OFF)
+option(EGGVISION_PI4_TUNING "Tune EggVision core for Raspberry Pi 4 Cortex-A72" OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
@@ -48,6 +49,14 @@ target_link_libraries(eggvision_core
         Threads::Threads)
 
 target_compile_options(eggvision_core PRIVATE -Wall -Wextra -Wpedantic)
+if(EGGVISION_PI4_TUNING)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        target_compile_options(eggvision_core PRIVATE -mcpu=cortex-a72)
+        message(STATUS "EggVision Pi 4 tuning enabled: -mcpu=cortex-a72")
+    else()
+        message(FATAL_ERROR "EGGVISION_PI4_TUNING requires an AArch64 target")
+    endif()
+endif()
 if(EGGVISION_ENABLE_TEST_HOOKS)
     # RtspServer's test-only state is declared in a public header, so every
     # translation unit that constructs it must see the same class layout.
