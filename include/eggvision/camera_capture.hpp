@@ -44,9 +44,9 @@ public:
 
 private:
     struct Mapping {
+        int fd = -1;
         void *base = nullptr;
         std::size_t mapped_length = 0;
-        const std::uint8_t *data = nullptr;
     };
 
     using MappingTable =
