@@ -34,6 +34,7 @@ add_library(eggvision_core
     src/event_recorder.cpp
     src/h264_bitstream.cpp
     src/h264_encoder.cpp
+    src/i420.cpp
     src/inference.cpp
     src/rtsp_server.cpp
     src/snapshot.cpp)

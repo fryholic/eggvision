@@ -1,6 +1,5 @@
 #include "eggvision/snapshot.hpp"
 
-#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <set>
@@ -28,75 +27,7 @@ bool synchronize(int fd, std::uint64_t flags, std::string &error) {
     return true;
 }
 
-void copyRows(std::uint8_t *target,
-              const std::uint8_t *source,
-              unsigned rows,
-              unsigned width,
-              unsigned stride) {
-    for (unsigned row = 0; row < rows; ++row) {
-        std::copy_n(source + static_cast<std::size_t>(row) * stride,
-                    width,
-                    target + static_cast<std::size_t>(row) * width);
-    }
-}
-
 }  // namespace
-
-bool copyMappedI420(const StreamView &view,
-                    std::vector<std::uint8_t> &destination,
-                    std::string &error) {
-    error.clear();
-    destination.clear();
-    if (view.width == 0 || view.height == 0 || view.width % 2 != 0 ||
-        view.height % 2 != 0 || view.stride < view.width || view.planes.empty()) {
-        error = "invalid mapped I420 layout";
-        return false;
-    }
-
-    const std::size_t y_size = static_cast<std::size_t>(view.width) * view.height;
-    const std::size_t chroma_size = y_size / 4;
-    destination.resize(y_size + 2 * chroma_size);
-
-    if (view.planes.size() == 1 && view.planes[0].data) {
-        const std::uint8_t *base = view.planes[0].data;
-        const unsigned chroma_stride = view.stride / 2;
-        const std::uint8_t *u = base + static_cast<std::size_t>(view.stride) * view.height;
-        const std::uint8_t *v = u + static_cast<std::size_t>(chroma_stride) * (view.height / 2);
-        copyRows(destination.data(), base, view.height, view.width, view.stride);
-        copyRows(destination.data() + y_size,
-                 u,
-                 view.height / 2,
-                 view.width / 2,
-                 chroma_stride);
-        copyRows(destination.data() + y_size + chroma_size,
-                 v,
-                 view.height / 2,
-                 view.width / 2,
-                 chroma_stride);
-        return true;
-    }
-    if (view.planes.size() == 3 && view.planes[0].data && view.planes[1].data &&
-        view.planes[2].data) {
-        copyRows(destination.data(),
-                 view.planes[0].data,
-                 view.height,
-                 view.width,
-                 view.stride);
-        copyRows(destination.data() + y_size,
-                 view.planes[1].data,
-                 view.height / 2,
-                 view.width / 2,
-                 view.stride / 2);
-        copyRows(destination.data() + y_size + chroma_size,
-                 view.planes[2].data,
-                 view.height / 2,
-                 view.width / 2,
-                 view.stride / 2);
-        return true;
-    }
-    error = "mapped I420 planes are unavailable";
-    return false;
-}
 
 bool stageMainSnapshot(const FrameLease &frame, MainSnapshot &snapshot, std::string &error) {
     error.clear();

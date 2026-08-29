@@ -1,4 +1,5 @@
 #include "eggvision/frame.hpp"
+#include "eggvision/i420.hpp"
 #include "eggvision/inference.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 
@@ -74,9 +75,88 @@ void expectNormalizationMatchesDivision(const cv::Mat &bgr, const std::string &c
            result.str());
 }
 
+eggvision::StreamView compactI420Fixture(std::vector<std::uint8_t> &storage) {
+    storage.resize(24);
+    for (std::size_t i = 0; i < storage.size(); ++i) {
+        storage[i] = static_cast<std::uint8_t>(i);
+    }
+    eggvision::StreamView view;
+    view.width = 4;
+    view.height = 4;
+    view.stride = 4;
+    view.frame_size = static_cast<unsigned>(storage.size());
+    view.planes = {
+        {17, 0, 16, 16, storage.data(), storage.data(), storage.size()},
+        {17, 16, 4, 4, storage.data() + 16, storage.data(), storage.size()},
+        {17, 20, 4, 4, storage.data() + 20, storage.data(), storage.size()},
+    };
+    return view;
+}
+
+void testCompactI420Inspection() {
+    std::vector<std::uint8_t> storage;
+    const eggvision::StreamView compatible = compactI420Fixture(storage);
+    const eggvision::CompactI420View result = eggvision::inspectCompactI420(compatible);
+    expect(result.status == eggvision::CompactI420Status::Compatible,
+           "compact I420 layout is accepted");
+    expect(result.data == storage.data() && result.size == storage.size(),
+           "compact I420 view spans the shared mapping");
+    expect(std::string(eggvision::compactI420StatusName(result.status)) == "compatible",
+           "compact I420 status has a stable metric name");
+
+    auto separate_fds = compatible;
+    separate_fds.planes[2].fd = 18;
+    expect(eggvision::inspectCompactI420(separate_fds).status ==
+               eggvision::CompactI420Status::DifferentFileDescriptors,
+           "separate I420 file descriptors reject zero-copy ingress");
+
+    auto non_compact = compatible;
+    ++non_compact.planes[1].offset;
+    ++non_compact.planes[1].data;
+    expect(eggvision::inspectCompactI420(non_compact).status ==
+               eggvision::CompactI420Status::NonCompactOffsets,
+           "gapped I420 offsets reject zero-copy ingress");
+
+    auto padded = compatible;
+    padded.stride = 6;
+    expect(eggvision::inspectCompactI420(padded).status ==
+               eggvision::CompactI420Status::UnexpectedStride,
+           "padded I420 stride rejects zero-copy ingress");
+
+    auto short_mapping = compatible;
+    for (auto &plane : short_mapping.planes) {
+        plane.mapped_length = storage.size() - 1;
+    }
+    expect(eggvision::inspectCompactI420(short_mapping).status ==
+               eggvision::CompactI420Status::MappingTooShort,
+           "short DMA-BUF mapping rejects zero-copy ingress");
+
+    auto short_plane = compatible;
+    short_plane.planes[2].length = 3;
+    expect(eggvision::inspectCompactI420(short_plane).status ==
+               eggvision::CompactI420Status::PlaneTooShort,
+           "short I420 plane rejects zero-copy ingress");
+
+    auto missing_mapping = compatible;
+    missing_mapping.planes[1].mapping_base = nullptr;
+    expect(eggvision::inspectCompactI420(missing_mapping).status ==
+               eggvision::CompactI420Status::MissingMapping,
+           "unmapped I420 plane rejects zero-copy ingress");
+
+    std::vector<std::uint8_t> packed;
+    std::string error;
+    expect(eggvision::copyMappedI420(compatible, packed, error),
+           "compatible I420 view can use the copy fallback");
+    expect(packed == storage, "copy fallback preserves compact I420 bytes");
+    expect(!eggvision::copyMappedI420(short_plane, packed, error),
+           "copy fallback rejects a short plane without reading past it");
+}
+
 }  // namespace
 
 int main() {
+    testCompactI420Inspection();
+
     const auto transform = eggvision::calculateLetterbox(640, 480, 320, 320);
     expect(near(transform.scale, 0.5F), "letterbox scale");
     expect(transform.pad_x == 0 && transform.pad_y == 40, "letterbox padding");
