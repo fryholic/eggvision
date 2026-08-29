@@ -1,8 +1,11 @@
+#include "eggvision/dma_buf_sync.hpp"
 #include "eggvision/frame.hpp"
+#include "eggvision/i420.hpp"
 #include "eggvision/inference.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -11,8 +14,12 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <linux/dma-buf.h>
+#include <opencv2/imgproc.hpp>
 
 namespace {
 
@@ -74,9 +81,233 @@ void expectNormalizationMatchesDivision(const cv::Mat &bgr, const std::string &c
            result.str());
 }
 
+eggvision::StreamView compactI420Fixture(std::vector<std::uint8_t> &storage) {
+    storage.resize(24);
+    for (std::size_t i = 0; i < storage.size(); ++i) {
+        storage[i] = static_cast<std::uint8_t>(i);
+    }
+    eggvision::StreamView view;
+    view.width = 4;
+    view.height = 4;
+    view.stride = 4;
+    view.frame_size = static_cast<unsigned>(storage.size());
+    view.planes = {
+        {17, 0, 16, 16, storage.data(), storage.data(), storage.size()},
+        {17, 16, 4, 4, storage.data() + 16, storage.data(), storage.size()},
+        {17, 20, 4, 4, storage.data() + 20, storage.data(), storage.size()},
+    };
+    return view;
+}
+
+void testCompactI420Inspection() {
+    std::vector<std::uint8_t> storage;
+    const eggvision::StreamView compatible = compactI420Fixture(storage);
+    const eggvision::CompactI420View result = eggvision::inspectCompactI420(compatible);
+    expect(result.status == eggvision::CompactI420Status::Compatible,
+           "compact I420 layout is accepted");
+    expect(result.data == storage.data() && result.size == storage.size(),
+           "compact I420 view spans the shared mapping");
+    expect(std::string(eggvision::compactI420StatusName(result.status)) == "compatible",
+           "compact I420 status has a stable metric name");
+
+    auto separate_fds = compatible;
+    separate_fds.planes[2].fd = 18;
+    expect(eggvision::inspectCompactI420(separate_fds).status ==
+               eggvision::CompactI420Status::DifferentFileDescriptors,
+           "separate I420 file descriptors reject zero-copy ingress");
+
+    auto non_compact = compatible;
+    ++non_compact.planes[1].offset;
+    ++non_compact.planes[1].data;
+    expect(eggvision::inspectCompactI420(non_compact).status ==
+               eggvision::CompactI420Status::NonCompactOffsets,
+           "gapped I420 offsets reject zero-copy ingress");
+
+    auto padded = compatible;
+    padded.stride = 6;
+    expect(eggvision::inspectCompactI420(padded).status ==
+               eggvision::CompactI420Status::UnexpectedStride,
+           "padded I420 stride rejects zero-copy ingress");
+
+    auto short_mapping = compatible;
+    for (auto &plane : short_mapping.planes) {
+        plane.mapped_length = storage.size() - 1;
+    }
+    expect(eggvision::inspectCompactI420(short_mapping).status ==
+               eggvision::CompactI420Status::MappingTooShort,
+           "short DMA-BUF mapping rejects zero-copy ingress");
+
+    auto short_plane = compatible;
+    short_plane.planes[2].length = 3;
+    expect(eggvision::inspectCompactI420(short_plane).status ==
+               eggvision::CompactI420Status::PlaneTooShort,
+           "short I420 plane rejects zero-copy ingress");
+
+    const std::uint32_t required_payloads[] = {16, 4, 4};
+    for (std::size_t plane_index = 0; plane_index < compatible.planes.size(); ++plane_index) {
+        auto short_payload = compatible;
+        short_payload.planes[plane_index].bytes_used = required_payloads[plane_index] - 1;
+        expect(eggvision::inspectCompactI420(short_payload).status ==
+                   eggvision::CompactI420Status::PayloadTooShort,
+               "short I420 payload rejects zero-copy ingress for plane " +
+                   std::to_string(plane_index));
+
+        std::vector<std::uint8_t> rejected;
+        std::string payload_error;
+        expect(!eggvision::copyMappedI420(short_payload, rejected, payload_error),
+               "copy fallback rejects a short I420 payload for plane " +
+                   std::to_string(plane_index));
+    }
+
+    auto missing_mapping = compatible;
+    missing_mapping.planes[1].mapping_base = nullptr;
+    expect(eggvision::inspectCompactI420(missing_mapping).status ==
+               eggvision::CompactI420Status::MissingMapping,
+           "unmapped I420 plane rejects zero-copy ingress");
+
+    std::vector<std::uint8_t> packed;
+    std::string error;
+    expect(eggvision::copyMappedI420(compatible, packed, error),
+           "compatible I420 view can use the copy fallback");
+    expect(packed == storage, "copy fallback preserves compact I420 bytes");
+
+    cv::Mat direct_i420(6, 4, CV_8UC1, storage.data());
+    cv::Mat copied_i420(6, 4, CV_8UC1, packed.data());
+    cv::Mat direct_bgr;
+    cv::Mat copied_bgr;
+    cv::cvtColor(direct_i420, direct_bgr, cv::COLOR_YUV2BGR_I420);
+    cv::cvtColor(copied_i420, copied_bgr, cv::COLOR_YUV2BGR_I420);
+    expect(cv::norm(direct_bgr, copied_bgr, cv::NORM_INF) == 0.0,
+           "zero-copy and fallback I420 conversions are bit-identical");
+
+    expect(!eggvision::copyMappedI420(short_plane, packed, error),
+           "copy fallback rejects a short plane without reading past it");
+
+    eggvision::StreamView single_plane = compatible;
+    single_plane.planes = {
+        {17,
+         0,
+         static_cast<std::uint32_t>(storage.size()),
+         static_cast<std::uint32_t>(storage.size()),
+         storage.data(),
+         storage.data(),
+         storage.size()},
+    };
+    expect(eggvision::copyMappedI420(single_plane, packed, error),
+           "single-plane copy accepts an exact payload boundary");
+    single_plane.planes[0].bytes_used = static_cast<std::uint32_t>(storage.size() - 1);
+    expect(!eggvision::copyMappedI420(single_plane, packed, error),
+           "single-plane copy rejects a short payload");
+}
+
+struct SyncCall {
+    int fd = -1;
+    std::uint64_t flags = 0;
+};
+
+struct SyncRecorder {
+    std::vector<SyncCall> calls;
+    int fail_fd = -1;
+    std::uint64_t fail_flags = 0;
+    int fail_error = EIO;
+    unsigned failures_remaining = 0;
+};
+
+int recordSync(int fd, std::uint64_t flags, void *context) {
+    auto &recorder = *static_cast<SyncRecorder *>(context);
+    recorder.calls.push_back({fd, flags});
+    if (recorder.failures_remaining > 0 && recorder.fail_fd == fd &&
+        recorder.fail_flags == flags) {
+        --recorder.failures_remaining;
+        return recorder.fail_error;
+    }
+    return 0;
+}
+
+void testDmaBufReadSync() {
+    std::vector<std::uint8_t> storage;
+    const eggvision::StreamView shared_fd = compactI420Fixture(storage);
+    const std::uint64_t start = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
+    const std::uint64_t end = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+
+    SyncRecorder shared_recorder;
+    std::string error;
+    {
+        eggvision::DmaBufReadSync sync(shared_fd, error, recordSync, &shared_recorder);
+        expect(static_cast<bool>(sync), "DMA-BUF read sync starts for a shared FD");
+        expect(shared_recorder.calls.size() == 1 && shared_recorder.calls[0].fd == 17 &&
+                   shared_recorder.calls[0].flags == start,
+               "shared plane FD is synchronized once");
+        expect(sync.finish(error), "DMA-BUF read sync ends successfully");
+    }
+    expect(shared_recorder.calls.size() == 2 && shared_recorder.calls[1].fd == 17 &&
+               shared_recorder.calls[1].flags == end,
+           "shared plane FD receives one matching END");
+
+    auto separate_fds = shared_fd;
+    separate_fds.planes[1].fd = 18;
+    separate_fds.planes[2].fd = 19;
+    SyncRecorder separate_recorder;
+    {
+        eggvision::DmaBufReadSync sync(separate_fds, error, recordSync, &separate_recorder);
+        expect(static_cast<bool>(sync), "DMA-BUF read sync starts for separate FDs");
+        expect(sync.finish(error), "separate DMA-BUF read sync ends successfully");
+    }
+    const int expected_fds[] = {17, 18, 19, 19, 18, 17};
+    const std::uint64_t expected_flags[] = {start, start, start, end, end, end};
+    expect(separate_recorder.calls.size() == 6,
+           "each separate FD receives one START and one END");
+    for (std::size_t i = 0; i < separate_recorder.calls.size() && i < 6; ++i) {
+        expect(separate_recorder.calls[i].fd == expected_fds[i] &&
+                   separate_recorder.calls[i].flags == expected_flags[i],
+               "separate DMA-BUF sync order " + std::to_string(i));
+    }
+
+    SyncRecorder partial_failure;
+    partial_failure.fail_fd = 18;
+    partial_failure.fail_flags = start;
+    partial_failure.failures_remaining = 1;
+    {
+        eggvision::DmaBufReadSync sync(separate_fds, error, recordSync, &partial_failure);
+        expect(!static_cast<bool>(sync), "middle DMA-BUF START failure is reported");
+    }
+    expect(partial_failure.calls.size() == 3 && partial_failure.calls[0].fd == 17 &&
+               partial_failure.calls[0].flags == start && partial_failure.calls[1].fd == 18 &&
+               partial_failure.calls[1].flags == start && partial_failure.calls[2].fd == 17 &&
+               partial_failure.calls[2].flags == end,
+           "middle START failure ends every previously-started FD");
+
+    SyncRecorder exception_cleanup;
+    try {
+        eggvision::DmaBufReadSync sync(shared_fd, error, recordSync, &exception_cleanup);
+        expect(static_cast<bool>(sync), "exception cleanup fixture starts DMA-BUF sync");
+        throw std::runtime_error("synthetic conversion failure");
+    } catch (const std::runtime_error &) {
+    }
+    expect(exception_cleanup.calls.size() == 2 && exception_cleanup.calls[1].flags == end,
+           "DMA-BUF read sync destructor ends access during exception unwinding");
+
+    SyncRecorder retry;
+    retry.fail_fd = 17;
+    retry.fail_flags = start;
+    retry.fail_error = EAGAIN;
+    retry.failures_remaining = 1;
+    {
+        eggvision::DmaBufReadSync sync(shared_fd, error, recordSync, &retry);
+        expect(static_cast<bool>(sync), "retryable DMA-BUF START failure is retried");
+        expect(sync.finish(error), "retried DMA-BUF sync ends successfully");
+    }
+    expect(retry.calls.size() == 3 && retry.calls[0].flags == start &&
+               retry.calls[1].flags == start && retry.calls[2].flags == end,
+           "EAGAIN repeats START before the matching END");
+}
+
 }  // namespace
 
 int main() {
+    testDmaBufReadSync();
+    testCompactI420Inspection();
+
     const auto transform = eggvision::calculateLetterbox(640, 480, 320, 320);
     expect(near(transform.scale, 0.5F), "letterbox scale");
     expect(transform.pad_x == 0 && transform.pad_y == 40, "letterbox padding");

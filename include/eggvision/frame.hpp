@@ -17,6 +17,8 @@ struct PlaneView {
     std::uint32_t length = 0;
     std::uint32_t bytes_used = 0;
     const std::uint8_t *data = nullptr;  // Only populated for the mapped lores stream.
+    const std::uint8_t *mapping_base = nullptr;
+    std::size_t mapped_length = 0;
 };
 
 struct StreamView {

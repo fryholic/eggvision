@@ -323,13 +323,20 @@ int main(int argc, char **argv) {
             const double average_inference_ms = inferred == 0
                                                     ? 0.0
                                                     : metrics.inference_total_us.load() / 1000.0 / inferred;
+            const double average_input_ms = inferred == 0
+                                                ? 0.0
+                                                : metrics.inference_input_total_us.load() / 1000.0 /
+                                                      inferred;
             std::cout << std::fixed << std::setprecision(2)
                       << "{\"type\":\"metrics\",\"capture_fps\":"
                       << (captured - last_capture) / seconds
                       << ",\"rtsp_fps\":" << (pushed - last_rtsp) / seconds
                       << ",\"inference_fps\":" << (inferred - last_inference) / seconds
                       << ",\"inference_avg_ms\":" << average_inference_ms
+                      << ",\"inference_input_avg_ms\":" << average_input_ms
                       << ",\"outstanding_leases\":" << metrics.outstanding_leases.load()
+                      << ",\"outstanding_leases_peak\":"
+                      << metrics.outstanding_leases_peak.load()
                       << ",\"encoder_access_units\":"
                       << metrics.encoder_access_units.load()
                       << ",\"encoder_output_bytes\":"
@@ -342,6 +349,34 @@ int main(int argc, char **argv) {
                       << metrics.encoder_recovery_failures.load()
                       << ",\"rtsp_dropped\":" << metrics.rtsp_dropped.load()
                       << ",\"inference_dropped\":" << metrics.inference_dropped.load()
+                      << ",\"inference_zero_copy_ingress\":"
+                      << metrics.inference_zero_copy_ingress.load()
+                      << ",\"inference_copy_fallback\":"
+                      << metrics.inference_copy_fallback.load()
+                      << ",\"inference_preprocess_errors\":"
+                      << metrics.inference_preprocess_errors.load()
+                      << ",\"inference_dma_sync_errors\":"
+                      << metrics.inference_dma_sync_errors.load()
+                      << ",\"inference_i420_rejections\":{\"invalid_dimensions\":"
+                      << metrics.inference_i420_invalid_dimensions.load()
+                      << ",\"unexpected_plane_count\":"
+                      << metrics.inference_i420_unexpected_plane_count.load()
+                      << ",\"unexpected_stride\":"
+                      << metrics.inference_i420_unexpected_stride.load()
+                      << ",\"invalid_fd\":" << metrics.inference_i420_invalid_fd.load()
+                      << ",\"separate_fds\":" << metrics.inference_i420_separate_fds.load()
+                      << ",\"missing_mapping\":"
+                      << metrics.inference_i420_missing_mapping.load()
+                      << ",\"inconsistent_mapping\":"
+                      << metrics.inference_i420_inconsistent_mapping.load()
+                      << ",\"non_compact_offsets\":"
+                      << metrics.inference_i420_non_compact_offsets.load()
+                      << ",\"plane_too_short\":"
+                      << metrics.inference_i420_plane_too_short.load()
+                      << ",\"payload_too_short\":"
+                      << metrics.inference_i420_payload_too_short.load()
+                      << ",\"mapping_too_short\":"
+                      << metrics.inference_i420_mapping_too_short.load() << '}'
                       << ",\"capture_errors\":" << metrics.capture_errors.load()
                       << ",\"rtsp_errors\":" << metrics.rtsp_errors.load()
                       << ",\"rtsp_recoveries\":" << metrics.rtsp_recoveries.load()
@@ -389,6 +424,13 @@ int main(int argc, char **argv) {
                   << " inferred=" << metrics.inference_processed.load()
                   << " encoded=" << metrics.encoder_access_units.load()
                   << " outstanding=" << metrics.outstanding_leases.load()
+                  << " outstanding_peak=" << metrics.outstanding_leases_peak.load()
+                  << " inference_zero_copy=" << metrics.inference_zero_copy_ingress.load()
+                  << " inference_copy_fallback=" << metrics.inference_copy_fallback.load()
+                  << " inference_preprocess_errors="
+                  << metrics.inference_preprocess_errors.load()
+                  << " inference_dma_sync_errors="
+                  << metrics.inference_dma_sync_errors.load()
                   << " capture_errors=" << metrics.capture_errors.load()
                   << " encoder_errors=" << metrics.encoder_errors.load()
                   << " encoder_recoveries=" << metrics.encoder_recoveries.load()

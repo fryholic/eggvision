@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <sys/mman.h>
 
@@ -172,19 +173,39 @@ bool CameraCapture::mapBuffers(libcamera::Stream *stream,
         std::vector<Mapping> mappings;
         mappings.reserve(buffer->planes().size());
         for (const auto &plane : buffer->planes()) {
+            const int fd = plane.fd.get();
+            if (fd < 0 || plane.length > std::numeric_limits<std::size_t>::max() - plane.offset) {
+                std::cerr << "[camera] " << name << " invalid DMA-BUF plane span\n";
+                return false;
+            }
             const std::size_t map_length = static_cast<std::size_t>(plane.offset) + plane.length;
-            void *base = mmap(nullptr, map_length, PROT_READ, MAP_SHARED, plane.fd.get(), 0);
-            if (base == MAP_FAILED) {
+            const auto existing = std::find_if(
+                mappings.begin(), mappings.end(), [fd](const Mapping &mapping) {
+                    return mapping.fd == fd;
+                });
+            if (existing == mappings.end()) {
+                mappings.push_back({fd, nullptr, map_length});
+            } else {
+                existing->mapped_length = std::max(existing->mapped_length, map_length);
+            }
+        }
+        for (Mapping &mapping : mappings) {
+            mapping.base = mmap(nullptr,
+                                mapping.mapped_length,
+                                PROT_READ,
+                                MAP_SHARED,
+                                mapping.fd,
+                                0);
+            if (mapping.base == MAP_FAILED) {
                 std::cerr << "[camera] " << name << " mmap failed: " << std::strerror(errno)
                           << '\n';
-                for (const Mapping &mapping : mappings) {
-                    munmap(mapping.base, mapping.mapped_length);
+                for (const Mapping &mapped : mappings) {
+                    if (mapped.base && mapped.base != MAP_FAILED) {
+                        munmap(mapped.base, mapped.mapped_length);
+                    }
                 }
                 return false;
             }
-            mappings.push_back({base,
-                                map_length,
-                                static_cast<const std::uint8_t *>(base) + plane.offset});
         }
         target.emplace(buffer.get(), std::move(mappings));
     }
@@ -285,11 +306,33 @@ StreamView CameraCapture::makeView(libcamera::FrameBuffer *buffer,
                                              ? metadata_planes[i].bytesused
                                              : plane.length;
         const std::uint8_t *data = nullptr;
-        if (mapping_it != mappings.end() && i < mapping_it->second.size()) {
-            data = mapping_it->second[i].data;
+        const std::uint8_t *mapping_base = nullptr;
+        std::size_t mapped_length = 0;
+        if (mapping_it != mappings.end()) {
+            const int fd = plane.fd.get();
+            const auto mapping = std::find_if(
+                mapping_it->second.begin(),
+                mapping_it->second.end(),
+                [fd](const Mapping &candidate) { return candidate.fd == fd; });
+            const bool valid_span =
+                plane.length <= std::numeric_limits<std::size_t>::max() - plane.offset;
+            const std::size_t plane_end = valid_span
+                                              ? static_cast<std::size_t>(plane.offset) + plane.length
+                                              : 0;
+            if (mapping != mapping_it->second.end() && valid_span &&
+                plane_end <= mapping->mapped_length) {
+                mapping_base = static_cast<const std::uint8_t *>(mapping->base);
+                mapped_length = mapping->mapped_length;
+                data = mapping_base + plane.offset;
+            }
         }
-        view.planes.push_back(
-            {plane.fd.get(), plane.offset, plane.length, bytes_used, data});
+        view.planes.push_back({plane.fd.get(),
+                               plane.offset,
+                               plane.length,
+                               bytes_used,
+                               data,
+                               mapping_base,
+                               mapped_length});
     }
     return view;
 }
@@ -317,7 +360,11 @@ void CameraCapture::onRequestCompleted(libcamera::Request *request) {
     const std::uint64_t sequence = main_buffer->metadata().sequence;
     const std::uint64_t timestamp = main_buffer->metadata().timestamp;
     metrics_.captured.fetch_add(1);
-    metrics_.outstanding_leases.fetch_add(1);
+    const std::uint64_t outstanding = metrics_.outstanding_leases.fetch_add(1) + 1;
+    std::uint64_t peak = metrics_.outstanding_leases_peak.load();
+    while (outstanding > peak &&
+           !metrics_.outstanding_leases_peak.compare_exchange_weak(peak, outstanding)) {
+    }
 
     std::weak_ptr<RecyclerState> weak_recycler = recycler_;
     Metrics *metrics = &metrics_;

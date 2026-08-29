@@ -1,4 +1,6 @@
 #include "eggvision/inference.hpp"
+#include "eggvision/dma_buf_sync.hpp"
+#include "eggvision/i420.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -7,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 
 #include <opencv2/imgproc.hpp>
@@ -18,6 +21,46 @@ using Clock = std::chrono::steady_clock;
 
 double milliseconds(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+void recordI420Rejection(Metrics &metrics, CompactI420Status status) {
+    switch (status) {
+        case CompactI420Status::Compatible:
+            return;
+        case CompactI420Status::InvalidDimensions:
+            metrics.inference_i420_invalid_dimensions.fetch_add(1);
+            return;
+        case CompactI420Status::UnexpectedPlaneCount:
+            metrics.inference_i420_unexpected_plane_count.fetch_add(1);
+            return;
+        case CompactI420Status::UnexpectedStride:
+            metrics.inference_i420_unexpected_stride.fetch_add(1);
+            return;
+        case CompactI420Status::InvalidFileDescriptor:
+            metrics.inference_i420_invalid_fd.fetch_add(1);
+            return;
+        case CompactI420Status::DifferentFileDescriptors:
+            metrics.inference_i420_separate_fds.fetch_add(1);
+            return;
+        case CompactI420Status::MissingMapping:
+            metrics.inference_i420_missing_mapping.fetch_add(1);
+            return;
+        case CompactI420Status::InconsistentMapping:
+            metrics.inference_i420_inconsistent_mapping.fetch_add(1);
+            return;
+        case CompactI420Status::NonCompactOffsets:
+            metrics.inference_i420_non_compact_offsets.fetch_add(1);
+            return;
+        case CompactI420Status::PlaneTooShort:
+            metrics.inference_i420_plane_too_short.fetch_add(1);
+            return;
+        case CompactI420Status::PayloadTooShort:
+            metrics.inference_i420_payload_too_short.fetch_add(1);
+            return;
+        case CompactI420Status::MappingTooShort:
+            metrics.inference_i420_mapping_too_short.fetch_add(1);
+            return;
+    }
 }
 
 }  // namespace
@@ -172,63 +215,6 @@ void InferenceWorker::submit(std::shared_ptr<FrameLease> frame) {
     }
 }
 
-bool InferenceWorker::copyLoresI420(const StreamView &view,
-                                    std::vector<std::uint8_t> &destination) const {
-    if (view.width == 0 || view.height == 0 || view.stride < view.width || view.planes.empty()) {
-        return false;
-    }
-    const std::size_t y_size = static_cast<std::size_t>(view.width) * view.height;
-    const std::size_t chroma_size = y_size / 4;
-    destination.resize(y_size + 2 * chroma_size);
-
-    auto copy_rows = [](std::uint8_t *target,
-                        const std::uint8_t *source,
-                        unsigned rows,
-                        unsigned width,
-                        unsigned stride) {
-        for (unsigned row = 0; row < rows; ++row) {
-            std::copy_n(source + static_cast<std::size_t>(row) * stride,
-                        width,
-                        target + static_cast<std::size_t>(row) * width);
-        }
-    };
-
-    if (view.planes.size() == 1 && view.planes[0].data) {
-        const std::uint8_t *base = view.planes[0].data;
-        const unsigned chroma_stride = view.stride / 2;
-        const std::uint8_t *u = base + static_cast<std::size_t>(view.stride) * view.height;
-        const std::uint8_t *v = u + static_cast<std::size_t>(chroma_stride) * (view.height / 2);
-        copy_rows(destination.data(), base, view.height, view.width, view.stride);
-        copy_rows(destination.data() + y_size,
-                  u,
-                  view.height / 2,
-                  view.width / 2,
-                  chroma_stride);
-        copy_rows(destination.data() + y_size + chroma_size,
-                  v,
-                  view.height / 2,
-                  view.width / 2,
-                  chroma_stride);
-        return true;
-    }
-    if (view.planes.size() == 3 && view.planes[0].data && view.planes[1].data &&
-        view.planes[2].data) {
-        copy_rows(destination.data(), view.planes[0].data, view.height, view.width, view.stride);
-        copy_rows(destination.data() + y_size,
-                  view.planes[1].data,
-                  view.height / 2,
-                  view.width / 2,
-                  view.stride / 2);
-        copy_rows(destination.data() + y_size + chroma_size,
-                  view.planes[2].data,
-                  view.height / 2,
-                  view.width / 2,
-                  view.stride / 2);
-        return true;
-    }
-    return false;
-}
-
 std::vector<Detection> InferenceWorker::infer(const cv::Mat &bgr,
                                               double &preprocess_ms,
                                               double &inference_ms,
@@ -288,31 +274,85 @@ std::vector<Detection> InferenceWorker::infer(const cv::Mat &bgr,
 
 void InferenceWorker::workerLoop() {
     std::vector<std::uint8_t> i420;
+    cv::Mat bgr;
+    std::optional<CompactI420Status> reported_rejection;
     while (running_.load()) {
         std::shared_ptr<FrameLease> frame;
         if (!latest_.waitPop(frame)) {
             break;
         }
         const StreamView &view = frame->lores();
-        if (!copyLoresI420(view, i420)) {
-            std::cerr << "[inference] unsupported lores plane layout\n";
-            continue;
-        }
-        cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
-                    static_cast<int>(view.width),
-                    CV_8UC1,
-                    i420.data());
-        cv::Mat bgr;
-        cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
-
         try {
+            const auto input_start = Clock::now();
+            const CompactI420View compact = inspectCompactI420(view);
+            std::string sync_error;
+            DmaBufReadSync read_sync(view, sync_error);
+            if (!read_sync) {
+                metrics_.inference_preprocess_errors.fetch_add(1);
+                metrics_.inference_dma_sync_errors.fetch_add(1);
+                std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                continue;
+            }
+
+            const std::uint8_t *i420_data = nullptr;
+            if (compact) {
+                metrics_.inference_zero_copy_ingress.fetch_add(1);
+                i420_data = compact.data;
+            } else {
+                metrics_.inference_copy_fallback.fetch_add(1);
+                recordI420Rejection(metrics_, compact.status);
+                if (!reported_rejection || *reported_rejection != compact.status) {
+                    std::cerr << "[inference] I420 copy fallback reason="
+                              << compactI420StatusName(compact.status) << '\n';
+                    reported_rejection = compact.status;
+                }
+                std::string error;
+                if (!copyMappedI420(view, i420, error)) {
+                    metrics_.inference_preprocess_errors.fetch_add(1);
+                    std::cerr << "[inference] I420 copy fallback failed: " << error << '\n';
+                    continue;
+                }
+                i420_data = i420.data();
+            }
+
+            if (compact) {
+                cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
+                            static_cast<int>(view.width),
+                            CV_8UC1,
+                            const_cast<std::uint8_t *>(i420_data));
+                cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
+                if (!read_sync.finish(sync_error)) {
+                    metrics_.inference_preprocess_errors.fetch_add(1);
+                    metrics_.inference_dma_sync_errors.fetch_add(1);
+                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    continue;
+                }
+            } else {
+                if (!read_sync.finish(sync_error)) {
+                    metrics_.inference_preprocess_errors.fetch_add(1);
+                    metrics_.inference_dma_sync_errors.fetch_add(1);
+                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    continue;
+                }
+                cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
+                            static_cast<int>(view.width),
+                            CV_8UC1,
+                            i420.data());
+                cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
+            }
+            const auto input_end = Clock::now();
+            const double input_ms = milliseconds(input_start, input_end);
+
             double preprocess_ms = 0.0;
             double inference_ms = 0.0;
             double postprocess_ms = 0.0;
             auto detections = infer(bgr, preprocess_ms, inference_ms, postprocess_ms);
             const double total_ms = preprocess_ms + inference_ms + postprocess_ms;
+            const double pipeline_ms = input_ms + total_ms;
             const std::uint64_t processed = metrics_.inference_processed.fetch_add(1) + 1;
             metrics_.detected_persons.fetch_add(detections.size());
+            metrics_.inference_input_total_us.fetch_add(
+                static_cast<std::uint64_t>(input_ms * 1000.0));
             metrics_.inference_total_us.fetch_add(static_cast<std::uint64_t>(total_ms * 1000.0));
             if (!detections.empty() && detection_consumer_) {
                 detection_consumer_(frame, detections);
@@ -321,10 +361,12 @@ void InferenceWorker::workerLoop() {
                 std::cout << std::fixed << std::setprecision(2)
                           << "{\"type\":\"inference\",\"sequence\":" << frame->sequence()
                           << ",\"persons\":" << detections.size()
+                          << ",\"input_ms\":" << input_ms
                           << ",\"preprocess_ms\":" << preprocess_ms
                           << ",\"inference_ms\":" << inference_ms
                           << ",\"postprocess_ms\":" << postprocess_ms
-                          << ",\"total_ms\":" << total_ms << "}\n";
+                          << ",\"total_ms\":" << total_ms
+                          << ",\"pipeline_ms\":" << pipeline_ms << "}\n";
             }
         } catch (const std::exception &error) {
             std::cerr << "[inference] frame failed: " << error.what() << '\n';

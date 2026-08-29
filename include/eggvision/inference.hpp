@@ -62,7 +62,6 @@ public:
     void stop();
 
 private:
-    bool copyLoresI420(const StreamView &view, std::vector<std::uint8_t> &destination) const;
     std::vector<Detection> infer(const cv::Mat &bgr,
                                  double &preprocess_ms,
                                  double &inference_ms,
