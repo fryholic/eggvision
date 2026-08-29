@@ -52,7 +52,7 @@ bool requiredRowSpan(unsigned rows,
 }
 
 bool containsBytes(const PlaneView &plane, std::size_t required) {
-    if (!plane.data || required > plane.length) {
+    if (!plane.data || required > plane.length || required > plane.bytes_used) {
         return false;
     }
     if (!plane.mapping_base) {
@@ -116,6 +116,10 @@ CompactI420View inspectCompactI420(const StreamView &view) {
     if (y.length < sizes.y || u.length < sizes.chroma || v.length < sizes.chroma) {
         return {CompactI420Status::PlaneTooShort};
     }
+    if (y.bytes_used < sizes.y || u.bytes_used < sizes.chroma ||
+        v.bytes_used < sizes.chroma) {
+        return {CompactI420Status::PayloadTooShort};
+    }
     if (view.frame_size < sizes.total || y.mapped_length < sizes.total) {
         return {CompactI420Status::MappingTooShort};
     }
@@ -148,6 +152,8 @@ const char *compactI420StatusName(CompactI420Status status) {
             return "non_compact_offsets";
         case CompactI420Status::PlaneTooShort:
             return "plane_too_short";
+        case CompactI420Status::PayloadTooShort:
+            return "payload_too_short";
         case CompactI420Status::MappingTooShort:
             return "mapping_too_short";
     }

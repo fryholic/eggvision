@@ -38,6 +38,7 @@ struct Metrics {
     std::atomic<std::uint64_t> inference_i420_inconsistent_mapping{0};
     std::atomic<std::uint64_t> inference_i420_non_compact_offsets{0};
     std::atomic<std::uint64_t> inference_i420_plane_too_short{0};
+    std::atomic<std::uint64_t> inference_i420_payload_too_short{0};
     std::atomic<std::uint64_t> inference_i420_mapping_too_short{0};
     std::atomic<std::uint64_t> detected_persons{0};
     std::atomic<std::uint64_t> inference_input_total_us{0};

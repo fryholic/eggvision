@@ -139,6 +139,22 @@ void testCompactI420Inspection() {
                eggvision::CompactI420Status::PlaneTooShort,
            "short I420 plane rejects zero-copy ingress");
 
+    const std::uint32_t required_payloads[] = {16, 4, 4};
+    for (std::size_t plane_index = 0; plane_index < compatible.planes.size(); ++plane_index) {
+        auto short_payload = compatible;
+        short_payload.planes[plane_index].bytes_used = required_payloads[plane_index] - 1;
+        expect(eggvision::inspectCompactI420(short_payload).status ==
+                   eggvision::CompactI420Status::PayloadTooShort,
+               "short I420 payload rejects zero-copy ingress for plane " +
+                   std::to_string(plane_index));
+
+        std::vector<std::uint8_t> rejected;
+        std::string payload_error;
+        expect(!eggvision::copyMappedI420(short_payload, rejected, payload_error),
+               "copy fallback rejects a short I420 payload for plane " +
+                   std::to_string(plane_index));
+    }
+
     auto missing_mapping = compatible;
     missing_mapping.planes[1].mapping_base = nullptr;
     expect(eggvision::inspectCompactI420(missing_mapping).status ==
@@ -162,6 +178,22 @@ void testCompactI420Inspection() {
 
     expect(!eggvision::copyMappedI420(short_plane, packed, error),
            "copy fallback rejects a short plane without reading past it");
+
+    eggvision::StreamView single_plane = compatible;
+    single_plane.planes = {
+        {17,
+         0,
+         static_cast<std::uint32_t>(storage.size()),
+         static_cast<std::uint32_t>(storage.size()),
+         storage.data(),
+         storage.data(),
+         storage.size()},
+    };
+    expect(eggvision::copyMappedI420(single_plane, packed, error),
+           "single-plane copy accepts an exact payload boundary");
+    single_plane.planes[0].bytes_used = static_cast<std::uint32_t>(storage.size() - 1);
+    expect(!eggvision::copyMappedI420(single_plane, packed, error),
+           "single-plane copy rejects a short payload");
 }
 
 }  // namespace

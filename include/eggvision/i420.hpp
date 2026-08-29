@@ -20,6 +20,7 @@ enum class CompactI420Status {
     InconsistentMapping,
     NonCompactOffsets,
     PlaneTooShort,
+    PayloadTooShort,
     MappingTooShort,
 };
 

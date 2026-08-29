@@ -53,6 +53,9 @@ void recordI420Rejection(Metrics &metrics, CompactI420Status status) {
         case CompactI420Status::PlaneTooShort:
             metrics.inference_i420_plane_too_short.fetch_add(1);
             return;
+        case CompactI420Status::PayloadTooShort:
+            metrics.inference_i420_payload_too_short.fetch_add(1);
+            return;
         case CompactI420Status::MappingTooShort:
             metrics.inference_i420_mapping_too_short.fetch_add(1);
             return;

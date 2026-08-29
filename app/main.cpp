@@ -371,6 +371,8 @@ int main(int argc, char **argv) {
                       << metrics.inference_i420_non_compact_offsets.load()
                       << ",\"plane_too_short\":"
                       << metrics.inference_i420_plane_too_short.load()
+                      << ",\"payload_too_short\":"
+                      << metrics.inference_i420_payload_too_short.load()
                       << ",\"mapping_too_short\":"
                       << metrics.inference_i420_mapping_too_short.load() << '}'
                       << ",\"capture_errors\":" << metrics.capture_errors.load()
