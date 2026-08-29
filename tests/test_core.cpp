@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include <opencv2/imgproc.hpp>
+
 namespace {
 
 int failures = 0;
@@ -148,6 +150,16 @@ void testCompactI420Inspection() {
     expect(eggvision::copyMappedI420(compatible, packed, error),
            "compatible I420 view can use the copy fallback");
     expect(packed == storage, "copy fallback preserves compact I420 bytes");
+
+    cv::Mat direct_i420(6, 4, CV_8UC1, storage.data());
+    cv::Mat copied_i420(6, 4, CV_8UC1, packed.data());
+    cv::Mat direct_bgr;
+    cv::Mat copied_bgr;
+    cv::cvtColor(direct_i420, direct_bgr, cv::COLOR_YUV2BGR_I420);
+    cv::cvtColor(copied_i420, copied_bgr, cv::COLOR_YUV2BGR_I420);
+    expect(cv::norm(direct_bgr, copied_bgr, cv::NORM_INF) == 0.0,
+           "zero-copy and fallback I420 conversions are bit-identical");
+
     expect(!eggvision::copyMappedI420(short_plane, packed, error),
            "copy fallback rejects a short plane without reading past it");
 }

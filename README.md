@@ -180,7 +180,7 @@ main 경로에는 전체 프레임 `memcpy`, `videoconvert`, CPU color conversio
 
 Debian GStreamer 1.22의 `v4l2h264enc` pad template은 DMABUF import를 지원하면서도 caps에는 `memory:DMABuf` feature를 광고하지 않는다. 따라서 caps는 `video/x-raw`로 협상하고 실제 memory type과 `output-io-mode=dmabuf-import`로 zero-copy를 보장한다. feature를 강제로 붙이면 `not-linked`가 발생한다.
 
-lores 추론 전처리에는 의도적으로 복사가 있다. stride가 있는 Y/U/V plane을 연속 I420으로 복사하고 BGR 변환, letterbox, RGB FP32 NCHW 변환을 수행한다. 이 복사는 640×480 추론 분기에만 존재하며 송출 경로와 무관하다.
+lores 추론 전처리는 검증된 compact I420 DMA-BUF를 복사하지 않고 OpenCV header로 직접 감싼다. Y/U/V가 같은 FD를 공유하고 offset, stride, mapping 범위 조건을 모두 통과해야 하며, 조건이 맞지 않으면 bounds 검사를 거친 연속 I420 복사 경로로 안전하게 fallback한다. 이후 BGR 변환, letterbox, RGB FP32 NCHW 변환은 유지되며 송출 경로와 무관하다. 운영 metrics의 `inference_zero_copy_ingress`, `inference_copy_fallback`, `inference_i420_rejections`, `outstanding_leases_peak`로 선택 경로와 buffer pressure를 확인할 수 있다.
 
 OpenVINO CPU는 `LATENCY` 모드와 2개 inference thread를 기본으로 사용한다. 현재 Raspberry Pi/OpenVINO 조합에서 자동 스레드 설정은 반복 추론 시 RSS가 증가했지만, 2개로 고정하면 모델 단독 500회에서 RSS가 고정되고 약 10 FPS를 유지했다. 스레드 수를 변경하면 반드시 장시간 RSS와 온도를 다시 검증한다.
 

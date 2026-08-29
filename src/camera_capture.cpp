@@ -360,7 +360,11 @@ void CameraCapture::onRequestCompleted(libcamera::Request *request) {
     const std::uint64_t sequence = main_buffer->metadata().sequence;
     const std::uint64_t timestamp = main_buffer->metadata().timestamp;
     metrics_.captured.fetch_add(1);
-    metrics_.outstanding_leases.fetch_add(1);
+    const std::uint64_t outstanding = metrics_.outstanding_leases.fetch_add(1) + 1;
+    std::uint64_t peak = metrics_.outstanding_leases_peak.load();
+    while (outstanding > peak &&
+           !metrics_.outstanding_leases_peak.compare_exchange_weak(peak, outstanding)) {
+    }
 
     std::weak_ptr<RecyclerState> weak_recycler = recycler_;
     Metrics *metrics = &metrics_;
