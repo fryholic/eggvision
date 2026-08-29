@@ -87,14 +87,15 @@ void bgrToNormalizedRgbChw(const cv::Mat &bgr, float *destination) {
     if (bgr.type() != CV_8UC3 || !destination) {
         throw std::invalid_argument("bgrToNormalizedRgbChw expects CV_8UC3 data");
     }
+    constexpr float kInv255 = 1.0F / 255.0F;
     const std::size_t plane_size = static_cast<std::size_t>(bgr.cols) * bgr.rows;
     for (int y = 0; y < bgr.rows; ++y) {
         const auto *row = bgr.ptr<cv::Vec3b>(y);
         for (int x = 0; x < bgr.cols; ++x) {
             const std::size_t index = static_cast<std::size_t>(y) * bgr.cols + x;
-            destination[index] = row[x][2] / 255.0F;
-            destination[plane_size + index] = row[x][1] / 255.0F;
-            destination[2 * plane_size + index] = row[x][0] / 255.0F;
+            destination[index] = static_cast<float>(row[x][2]) * kInv255;
+            destination[plane_size + index] = static_cast<float>(row[x][1]) * kInv255;
+            destination[2 * plane_size + index] = static_cast<float>(row[x][0]) * kInv255;
         }
     }
 }

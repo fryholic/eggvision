@@ -2,10 +2,15 @@
 #include "eggvision/inference.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -22,6 +27,51 @@ void expect(bool condition, const std::string &message) {
 
 bool near(float left, float right, float epsilon = 0.01F) {
     return std::fabs(left - right) <= epsilon;
+}
+
+std::uint32_t floatBits(float value) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+std::uint32_t ulpDistance(float left, float right) {
+    const std::uint32_t left_bits = floatBits(left);
+    const std::uint32_t right_bits = floatBits(right);
+    return left_bits > right_bits ? left_bits - right_bits : right_bits - left_bits;
+}
+
+void expectNormalizationMatchesDivision(const cv::Mat &bgr, const std::string &case_name) {
+    const std::size_t plane_size = static_cast<std::size_t>(bgr.cols) * bgr.rows;
+    std::vector<float> actual(plane_size * 3);
+    eggvision::bgrToNormalizedRgbChw(bgr, actual.data());
+
+    std::uint32_t max_ulp = 0;
+    float max_absolute_error = 0.0F;
+    for (int y = 0; y < bgr.rows; ++y) {
+        const auto *row = bgr.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < bgr.cols; ++x) {
+            const std::size_t index = static_cast<std::size_t>(y) * bgr.cols + x;
+            const float expected[] = {
+                static_cast<float>(row[x][2]) / 255.0F,
+                static_cast<float>(row[x][1]) / 255.0F,
+                static_cast<float>(row[x][0]) / 255.0F,
+            };
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                const float observed = actual[channel * plane_size + index];
+                max_ulp = std::max(max_ulp, ulpDistance(observed, expected[channel]));
+                max_absolute_error =
+                    std::max(max_absolute_error, std::fabs(observed - expected[channel]));
+            }
+        }
+    }
+
+    std::ostringstream result;
+    result << case_name << " normalization differs from division by max_ulp=" << max_ulp
+           << " max_absolute_error=" << max_absolute_error;
+    expect(max_ulp <= 1 && max_absolute_error <= std::numeric_limits<float>::epsilon() / 2.0F,
+           result.str());
 }
 
 }  // namespace
@@ -49,6 +99,29 @@ int main() {
     expect(near(chw[0], 30.0F / 255.0F), "BGR red channel maps to RGB CHW plane 0");
     expect(near(chw[1], 20.0F / 255.0F), "BGR green channel maps to RGB CHW plane 1");
     expect(near(chw[2], 10.0F / 255.0F), "BGR blue channel maps to RGB CHW plane 2");
+
+    cv::Mat all_values(1, 256, CV_8UC3);
+    for (int value = 0; value <= 255; ++value) {
+        all_values.at<cv::Vec3b>(0, value) = cv::Vec3b(
+            static_cast<std::uint8_t>(value),
+            static_cast<std::uint8_t>(255 - value),
+            static_cast<std::uint8_t>((value * 127) % 256));
+    }
+    expectNormalizationMatchesDivision(all_values, "all u8 values");
+
+    cv::Mat random_storage(322, 324, CV_8UC3);
+    std::mt19937 random(0x45564732U);
+    for (int y = 0; y < random_storage.rows; ++y) {
+        auto *row = random_storage.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < random_storage.cols; ++x) {
+            row[x] = cv::Vec3b(static_cast<std::uint8_t>(random() & 0xffU),
+                               static_cast<std::uint8_t>(random() & 0xffU),
+                               static_cast<std::uint8_t>(random() & 0xffU));
+        }
+    }
+    const cv::Mat random_non_contiguous = random_storage(cv::Rect(2, 1, 320, 320));
+    expect(!random_non_contiguous.isContinuous(), "random normalization fixture has row stride");
+    expectNormalizationMatchesDivision(random_non_contiguous, "random 320x320 ROI");
 
     eggvision::LatestFrameQueue<int> queue;
     expect(!queue.push(1), "first latest-frame insert is not a replacement");
