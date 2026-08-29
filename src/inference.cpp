@@ -1,4 +1,5 @@
 #include "eggvision/inference.hpp"
+#include "eggvision/dma_buf_sync.hpp"
 #include "eggvision/i420.hpp"
 
 #include <algorithm>
@@ -284,6 +285,15 @@ void InferenceWorker::workerLoop() {
         try {
             const auto input_start = Clock::now();
             const CompactI420View compact = inspectCompactI420(view);
+            std::string sync_error;
+            DmaBufReadSync read_sync(view, sync_error);
+            if (!read_sync) {
+                metrics_.inference_preprocess_errors.fetch_add(1);
+                metrics_.inference_dma_sync_errors.fetch_add(1);
+                std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                continue;
+            }
+
             const std::uint8_t *i420_data = nullptr;
             if (compact) {
                 metrics_.inference_zero_copy_ingress.fetch_add(1);
@@ -305,11 +315,31 @@ void InferenceWorker::workerLoop() {
                 i420_data = i420.data();
             }
 
-            cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
-                        static_cast<int>(view.width),
-                        CV_8UC1,
-                        const_cast<std::uint8_t *>(i420_data));
-            cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
+            if (compact) {
+                cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
+                            static_cast<int>(view.width),
+                            CV_8UC1,
+                            const_cast<std::uint8_t *>(i420_data));
+                cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
+                if (!read_sync.finish(sync_error)) {
+                    metrics_.inference_preprocess_errors.fetch_add(1);
+                    metrics_.inference_dma_sync_errors.fetch_add(1);
+                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    continue;
+                }
+            } else {
+                if (!read_sync.finish(sync_error)) {
+                    metrics_.inference_preprocess_errors.fetch_add(1);
+                    metrics_.inference_dma_sync_errors.fetch_add(1);
+                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    continue;
+                }
+                cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
+                            static_cast<int>(view.width),
+                            CV_8UC1,
+                            i420.data());
+                cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_I420);
+            }
             const auto input_end = Clock::now();
             const double input_ms = milliseconds(input_start, input_end);
 

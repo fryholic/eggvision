@@ -355,6 +355,8 @@ int main(int argc, char **argv) {
                       << metrics.inference_copy_fallback.load()
                       << ",\"inference_preprocess_errors\":"
                       << metrics.inference_preprocess_errors.load()
+                      << ",\"inference_dma_sync_errors\":"
+                      << metrics.inference_dma_sync_errors.load()
                       << ",\"inference_i420_rejections\":{\"invalid_dimensions\":"
                       << metrics.inference_i420_invalid_dimensions.load()
                       << ",\"unexpected_plane_count\":"
@@ -427,6 +429,8 @@ int main(int argc, char **argv) {
                   << " inference_copy_fallback=" << metrics.inference_copy_fallback.load()
                   << " inference_preprocess_errors="
                   << metrics.inference_preprocess_errors.load()
+                  << " inference_dma_sync_errors="
+                  << metrics.inference_dma_sync_errors.load()
                   << " capture_errors=" << metrics.capture_errors.load()
                   << " encoder_errors=" << metrics.encoder_errors.load()
                   << " encoder_recoveries=" << metrics.encoder_recoveries.load()

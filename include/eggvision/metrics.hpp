@@ -29,6 +29,7 @@ struct Metrics {
     std::atomic<std::uint64_t> inference_zero_copy_ingress{0};
     std::atomic<std::uint64_t> inference_copy_fallback{0};
     std::atomic<std::uint64_t> inference_preprocess_errors{0};
+    std::atomic<std::uint64_t> inference_dma_sync_errors{0};
     std::atomic<std::uint64_t> inference_i420_invalid_dimensions{0};
     std::atomic<std::uint64_t> inference_i420_unexpected_plane_count{0};
     std::atomic<std::uint64_t> inference_i420_unexpected_stride{0};

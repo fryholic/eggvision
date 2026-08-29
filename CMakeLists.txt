@@ -30,6 +30,7 @@ find_package(Threads REQUIRED)
 
 add_library(eggvision_core
     src/camera_capture.cpp
+    src/dma_buf_sync.cpp
     src/encoded_ring_buffer.cpp
     src/event_recorder.cpp
     src/h264_bitstream.cpp

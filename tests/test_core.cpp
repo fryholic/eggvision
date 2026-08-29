@@ -1,9 +1,11 @@
+#include "eggvision/dma_buf_sync.hpp"
 #include "eggvision/frame.hpp"
 #include "eggvision/i420.hpp"
 #include "eggvision/inference.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -12,9 +14,11 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <linux/dma-buf.h>
 #include <opencv2/imgproc.hpp>
 
 namespace {
@@ -196,9 +200,112 @@ void testCompactI420Inspection() {
            "single-plane copy rejects a short payload");
 }
 
+struct SyncCall {
+    int fd = -1;
+    std::uint64_t flags = 0;
+};
+
+struct SyncRecorder {
+    std::vector<SyncCall> calls;
+    int fail_fd = -1;
+    std::uint64_t fail_flags = 0;
+    int fail_error = EIO;
+    unsigned failures_remaining = 0;
+};
+
+int recordSync(int fd, std::uint64_t flags, void *context) {
+    auto &recorder = *static_cast<SyncRecorder *>(context);
+    recorder.calls.push_back({fd, flags});
+    if (recorder.failures_remaining > 0 && recorder.fail_fd == fd &&
+        recorder.fail_flags == flags) {
+        --recorder.failures_remaining;
+        return recorder.fail_error;
+    }
+    return 0;
+}
+
+void testDmaBufReadSync() {
+    std::vector<std::uint8_t> storage;
+    const eggvision::StreamView shared_fd = compactI420Fixture(storage);
+    const std::uint64_t start = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
+    const std::uint64_t end = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+
+    SyncRecorder shared_recorder;
+    std::string error;
+    {
+        eggvision::DmaBufReadSync sync(shared_fd, error, recordSync, &shared_recorder);
+        expect(static_cast<bool>(sync), "DMA-BUF read sync starts for a shared FD");
+        expect(shared_recorder.calls.size() == 1 && shared_recorder.calls[0].fd == 17 &&
+                   shared_recorder.calls[0].flags == start,
+               "shared plane FD is synchronized once");
+        expect(sync.finish(error), "DMA-BUF read sync ends successfully");
+    }
+    expect(shared_recorder.calls.size() == 2 && shared_recorder.calls[1].fd == 17 &&
+               shared_recorder.calls[1].flags == end,
+           "shared plane FD receives one matching END");
+
+    auto separate_fds = shared_fd;
+    separate_fds.planes[1].fd = 18;
+    separate_fds.planes[2].fd = 19;
+    SyncRecorder separate_recorder;
+    {
+        eggvision::DmaBufReadSync sync(separate_fds, error, recordSync, &separate_recorder);
+        expect(static_cast<bool>(sync), "DMA-BUF read sync starts for separate FDs");
+        expect(sync.finish(error), "separate DMA-BUF read sync ends successfully");
+    }
+    const int expected_fds[] = {17, 18, 19, 19, 18, 17};
+    const std::uint64_t expected_flags[] = {start, start, start, end, end, end};
+    expect(separate_recorder.calls.size() == 6,
+           "each separate FD receives one START and one END");
+    for (std::size_t i = 0; i < separate_recorder.calls.size() && i < 6; ++i) {
+        expect(separate_recorder.calls[i].fd == expected_fds[i] &&
+                   separate_recorder.calls[i].flags == expected_flags[i],
+               "separate DMA-BUF sync order " + std::to_string(i));
+    }
+
+    SyncRecorder partial_failure;
+    partial_failure.fail_fd = 18;
+    partial_failure.fail_flags = start;
+    partial_failure.failures_remaining = 1;
+    {
+        eggvision::DmaBufReadSync sync(separate_fds, error, recordSync, &partial_failure);
+        expect(!static_cast<bool>(sync), "middle DMA-BUF START failure is reported");
+    }
+    expect(partial_failure.calls.size() == 3 && partial_failure.calls[0].fd == 17 &&
+               partial_failure.calls[0].flags == start && partial_failure.calls[1].fd == 18 &&
+               partial_failure.calls[1].flags == start && partial_failure.calls[2].fd == 17 &&
+               partial_failure.calls[2].flags == end,
+           "middle START failure ends every previously-started FD");
+
+    SyncRecorder exception_cleanup;
+    try {
+        eggvision::DmaBufReadSync sync(shared_fd, error, recordSync, &exception_cleanup);
+        expect(static_cast<bool>(sync), "exception cleanup fixture starts DMA-BUF sync");
+        throw std::runtime_error("synthetic conversion failure");
+    } catch (const std::runtime_error &) {
+    }
+    expect(exception_cleanup.calls.size() == 2 && exception_cleanup.calls[1].flags == end,
+           "DMA-BUF read sync destructor ends access during exception unwinding");
+
+    SyncRecorder retry;
+    retry.fail_fd = 17;
+    retry.fail_flags = start;
+    retry.fail_error = EAGAIN;
+    retry.failures_remaining = 1;
+    {
+        eggvision::DmaBufReadSync sync(shared_fd, error, recordSync, &retry);
+        expect(static_cast<bool>(sync), "retryable DMA-BUF START failure is retried");
+        expect(sync.finish(error), "retried DMA-BUF sync ends successfully");
+    }
+    expect(retry.calls.size() == 3 && retry.calls[0].flags == start &&
+               retry.calls[1].flags == start && retry.calls[2].flags == end,
+           "EAGAIN repeats START before the matching END");
+}
+
 }  // namespace
 
 int main() {
+    testDmaBufReadSync();
     testCompactI420Inspection();
 
     const auto transform = eggvision::calculateLetterbox(640, 480, 320, 320);
