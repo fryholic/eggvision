@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(eggvision VERSION 1.0.0 LANGUAGES CXX)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(ValidateStaticArchive)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -41,6 +44,7 @@ endif()
 if(NOT EXISTS "${MNN_LIBRARY}" OR IS_DIRECTORY "${MNN_LIBRARY}")
     message(FATAL_ERROR "Pinned static MNN archive not found: ${MNN_LIBRARY}")
 endif()
+eggvision_validate_static_archive("${MNN_LIBRARY}" "Pinned MNN runtime")
 add_library(MNNRuntime STATIC IMPORTED)
 set_target_properties(MNNRuntime PROPERTIES
     IMPORTED_LOCATION "${MNN_LIBRARY}"
@@ -91,6 +95,16 @@ endif()
 
 add_executable(eggvision_app app/main.cpp)
 target_link_libraries(eggvision_app PRIVATE eggvision_core)
+if(NOT CMAKE_READELF OR CMAKE_READELF MATCHES "-NOTFOUND$")
+    message(FATAL_ERROR "readelf is required to verify the static MNN deployment contract")
+endif()
+add_custom_command(TARGET eggvision_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -DBINARY_PATH=$<TARGET_FILE:eggvision_app>
+        -DREADELF_EXECUTABLE=${CMAKE_READELF}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNoMnnSharedDependency.cmake
+    COMMENT "Verifying that eggvision_app has no shared MNN dependency"
+    VERBATIM)
 
 if(EGGVISION_BUILD_TESTS)
     enable_testing()
@@ -119,6 +133,24 @@ if(EGGVISION_BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/soak_gate_test.py
             ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_soak_log.py)
+
+    add_library(eggvision_mnn_shared_fixture SHARED tests/mnn_shared_fixture.cpp)
+    set_target_properties(eggvision_mnn_shared_fixture PROPERTIES
+        OUTPUT_NAME "MNN-shared-fixture")
+    add_test(NAME eggvision_mnn_archive_validation
+        COMMAND ${CMAKE_COMMAND}
+            -DTEST_ROOT=${CMAKE_BINARY_DIR}/mnn-archive-validation-test
+            -DMNN_ARCHIVE=${MNN_LIBRARY}
+            -DSHARED_FIXTURE=$<TARGET_FILE:eggvision_mnn_shared_fixture>
+            -DAR_EXECUTABLE=${CMAKE_AR}
+            -DVALIDATOR_MODULE=${CMAKE_CURRENT_SOURCE_DIR}/cmake/ValidateStaticArchive.cmake
+            -DVALIDATION_ENTRYPOINT=${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mnn_archive_validation.cmake
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_mnn_archive_validation.cmake)
+    add_test(NAME eggvision_no_mnn_shared_dependency
+        COMMAND ${CMAKE_COMMAND}
+            -DBINARY_PATH=$<TARGET_FILE:eggvision_app>
+            -DREADELF_EXECUTABLE=${CMAKE_READELF}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNoMnnSharedDependency.cmake)
 
     add_executable(eggvision_normalization_benchmark tests/normalization_benchmark.cpp)
     target_link_libraries(eggvision_normalization_benchmark PRIVATE eggvision_core)
