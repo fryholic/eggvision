@@ -12,6 +12,9 @@ Environment=LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib
 StateDirectory=eggvision
 StateDirectoryMode=0750
 ExecStart=/home/pi/eggvision/build/eggvision_app \
+  --inference-backend mnn \
+  --model /home/pi/eggvision/models/yolov5n.mnn \
+  --inference-threads 3 \
   --events-dir /var/lib/eggvision/events \
   --event-pre-seconds 1.5 \
   --event-post-seconds 1.5 \

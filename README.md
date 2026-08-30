@@ -3,7 +3,8 @@
 Raspberry Pi 4에서 libcamera 저수준 API로 카메라 요청 하나에 두 개의 YUV420 스트림을 만들고 다음 작업을 동시에 수행한다.
 
 - main 1920×1080@30: libcamera DMABUF를 복사하지 않고 GStreamer V4L2 H.264 인코더로 전달하여 RTSP 송출
-- lores 640×480@30: latest-frame 큐를 통해 OpenVINO YOLOv5n 320×320 사람 추론
+- lores 640×480@30: latest-frame 큐를 통해 MNN(기본) 또는 OpenVINO(rollback)
+  YOLOv5n 320×320 사람 추론
 
 기본 RTSP URL은 `rtsp://<raspberry-pi-ip>:8554/stream`이다. 현재 검증 장비는 Raspberry Pi 4B 8GB, Debian 12, kernel 6.12.45, OV5647이다.
 
@@ -19,7 +20,7 @@ flowchart LR
     A --> R["RTSP H.264 High@L4"]
     A --> B["4-second bounded RAM ring"]
     L --> Q["latest-frame queue capacity 1"]
-    Q --> O["OpenCV pre-process + OpenVINO CPU"]
+    Q --> O["OpenCV pre-process + MNN/OpenVINO CPU"]
     O --> T["person detection trigger"]
     T --> E["JPEG + pre/post event MP4"]
     B --> E
@@ -44,16 +45,28 @@ sudo ./scripts/install_dependencies.sh
 - GStreamer 1.22: core, app, allocators, RTSP server, video, good/bad/ugly/libav plugins
 - OpenVINO Runtime 2025.3 (`/usr/local/runtime`)
 - OpenCV 4.9 (`/usr/local`)
+- MNN 3.6.1 commit `d407447e...` 정적 runtime
 
 `gstreamer1.0-libcamera`는 이 애플리케이션에 필요하지 않다. 배포판 패키지가 현재 동작 중인 커스텀 libcamera를 교체할 수 있으므로 설치 스크립트에서도 제외했다.
 
+검증된 MNN 정적 runtime은 별도로 빌드한다. 두 번째 인자는 선택적인 소스·빌드
+작업 디렉터리이며, 스크립트는 고정 commit과 Cortex-A72/NEON release 옵션을
+사용한다.
+
+```bash
+sudo mkdir -p /usr/local/eggvision
+sudo chown "$USER" /usr/local/eggvision
+./scripts/build_mnn_runtime.sh /usr/local/eggvision/mnn-3.6.1
+```
+
 ## 모델 준비
 
-OpenVINO IR 두 파일을 다음 위치에 둔다.
+MNN 기본 모델과 OpenVINO rollback 모델을 다음 위치에 둔다.
 
 ```text
 models/yolov5n.xml
 models/yolov5n.bin
+models/yolov5n.mnn
 ```
 
 모델 입력은 FP32 `[1,3,320,320]`, 출력은 FP32 `[1,6300,85]`여야 한다. 모델 파일은 라이선스와 학습 데이터 provenance가 별도이므로 Git에서 제외한다. 자세한 내용은 `models/README.md`를 참고한다.
@@ -76,6 +89,7 @@ rpicam-hello --list-cameras
 ```bash
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
+  -DMNN_ROOT=/usr/local/eggvision/mnn-3.6.1 \
   -DOpenVINO_DIR=/usr/local/runtime/cmake \
   -DOpenCV_DIR=/usr/local/lib/cmake/opencv4
 cmake --build build -j2
@@ -93,6 +107,7 @@ AArch64 명령어 호환성은 유지된다. 기본값은 `OFF`이며 실제 wor
 cmake -S . -B build-pi4 \
   -DCMAKE_BUILD_TYPE=Release \
   -DEGGVISION_PI4_TUNING=ON \
+  -DMNN_ROOT=/usr/local/eggvision/mnn-3.6.1 \
   -DOpenVINO_DIR=/usr/local/runtime/cmake \
   -DOpenCV_DIR=/usr/local/lib/cmake/opencv4
 cmake --build build-pi4 -j2
@@ -108,6 +123,7 @@ export LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRAR
 주요 옵션:
 
 ```text
+--inference-backend mnn|openvino
 --model PATH
 --port 8554
 --mount /stream
@@ -115,7 +131,7 @@ export LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRAR
 --gop 12
 --confidence 0.30
 --nms 0.45
---inference-threads 2
+--inference-threads 3
 --events-dir /var/lib/eggvision/events
 --event-pre-seconds 1.5
 --event-post-seconds 1.5
@@ -130,7 +146,15 @@ export LD_LIBRARY_PATH=/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRAR
 --no-event-recording
 ```
 
-확정된 해상도, stride, plane FD/offset, 모델 shape를 시작할 때 출력한다. 5초마다 캡처·RTSP·추론 FPS, 드롭 수, outstanding lease, 오류 수를 JSON 한 줄로 출력한다. SIGINT와 SIGTERM은 카메라 생산 중지, RTSP 종료, 추론 종료 순서로 안전하게 정리한다.
+기본값은 MNN FP32, 3 thread, `Memory_Low`다. `--inference-backend openvino`를
+지정하면 모델과 thread를 별도로 override하지 않은 경우 검증된 OpenVINO XML과
+2 thread를 사용한다. 선택한 backend의 초기화 실패를 다른 runtime으로 조용히
+fallback하지 않는다.
+
+확정된 해상도, stride, plane FD/offset, backend, 모델 shape와 SHA-256을 시작할
+때 출력한다. 5초마다 캡처·RTSP·추론 FPS, 드롭 수, backend/model hash,
+outstanding lease, 오류 수를 JSON 한 줄로 출력한다. SIGINT와 SIGTERM은 카메라
+생산 중지, RTSP 종료, 추론 종료 순서로 안전하게 정리한다.
 
 ## 사람 감지 이벤트 저장
 
@@ -180,9 +204,11 @@ main 경로에는 전체 프레임 `memcpy`, `videoconvert`, CPU color conversio
 
 Debian GStreamer 1.22의 `v4l2h264enc` pad template은 DMABUF import를 지원하면서도 caps에는 `memory:DMABuf` feature를 광고하지 않는다. 따라서 caps는 `video/x-raw`로 협상하고 실제 memory type과 `output-io-mode=dmabuf-import`로 zero-copy를 보장한다. feature를 강제로 붙이면 `not-linked`가 발생한다.
 
-lores 추론 전처리는 검증된 compact I420 DMA-BUF를 복사하지 않고 OpenCV header로 직접 감싼다. Y/U/V가 같은 FD를 공유하고 offset, stride, mapping 범위 조건을 모두 통과해야 하며, 조건이 맞지 않으면 bounds 검사를 거친 연속 I420 복사 경로로 안전하게 fallback한다. 이후 BGR 변환, letterbox, RGB FP32 NCHW 변환은 유지되며 송출 경로와 무관하다. 운영 metrics의 `inference_zero_copy_ingress`, `inference_copy_fallback`, `inference_i420_rejections`, `outstanding_leases_peak`로 선택 경로와 buffer pressure를 확인할 수 있다.
+lores 추론 전처리는 검증된 compact I420 DMA-BUF를 복사하지 않고 OpenCV header로 직접 감싼다. Y/U/V가 같은 FD를 공유하고 offset, stride, mapping 범위 조건을 모두 통과해야 하며, 조건이 맞지 않으면 bounds 검사를 거친 연속 I420 복사 경로로 안전하게 fallback한다. 이후 BGR 변환과 letterbox는 유지되고 RGB FP32 NCHW 값은 선택한 runtime의 입력 tensor에 직접 기록한다. MNN 통합 때문에 별도의 1.2 MiB FP32 staging buffer나 `copyFromHostTensor`를 추가하지 않는다. 운영 metrics의 `inference_zero_copy_ingress`, `inference_copy_fallback`, `inference_i420_rejections`, `inference_backend_errors`, `outstanding_leases_peak`로 선택 경로와 buffer pressure를 확인할 수 있다.
 
-OpenVINO CPU는 `LATENCY` 모드와 2개 inference thread를 기본으로 사용한다. 현재 Raspberry Pi/OpenVINO 조합에서 자동 스레드 설정은 반복 추론 시 RSS가 증가했지만, 2개로 고정하면 모델 단독 500회에서 RSS가 고정되고 약 10 FPS를 유지했다. 스레드 수를 변경하면 반드시 장시간 RSS와 온도를 다시 검증한다.
+MNN CPU는 FP32, `Memory_Low`, 3개 inference thread를 기본으로 사용한다.
+OpenVINO rollback은 `LATENCY` 모드와 2개 thread를 사용한다. 스레드 수를
+변경하면 반드시 장시간 RSS, tail latency와 온도를 다시 검증한다.
 
 ## 장시간 시험
 
@@ -213,7 +239,8 @@ journalctl -u eggvision -f
 - `Failed enabling i/p port, ret -3`: H.264 caps가 High Profile/Level 4인지 확인한다. 1080p30에서 기본 협상된 Level 1은 펌웨어가 거부한다.
 - `Got 3 dmabuf but needed 1`: 같은 FD의 세 plane을 각각 GstMemory로 추가한 구현이다. 현재 코드는 하나의 memory와 세 VideoMeta offset으로 결합한다.
 - RTSP 503: `GST_DEBUG=v4l2*:6,rtspmedia:5`로 실행해 caps 고정 여부와 DMABUF import 오류를 확인한다.
-- 모델 초기화 실패: XML과 BIN이 함께 있는지, shape가 `[1,3,320,320]`/`[1,6300,85]`인지 확인한다.
+- 모델 초기화 실패: 선택 backend와 확장자가 맞는지, MNN 파일 또는 XML/BIN이
+  함께 있는지, FP32 NCHW shape가 `[1,3,320,320]`/`[1,6300,85]`인지 확인한다.
 - 포트 재사용 실패: 이전 `eggvision_app` 프로세스가 남아 있는지 `ss -ltnp | grep 8554`로 확인한다.
 
 ## 범위 밖 기능

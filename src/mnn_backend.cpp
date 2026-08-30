@@ -1,7 +1,12 @@
 #include "eggvision/inference_backend.hpp"
 
 #include <MNN/Interpreter.hpp>
+#include <MNN/MNNDefine.h>
 #include <MNN/Tensor.hpp>
+
+#if MNN_VERSION_MAJOR != 3 || MNN_VERSION_MINOR != 6 || MNN_VERSION_PATCH != 1
+#error "EggVision requires the validated MNN 3.6.1 runtime"
+#endif
 
 #include <exception>
 #include <memory>
