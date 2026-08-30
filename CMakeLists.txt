@@ -29,16 +29,18 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
 find_package(Threads REQUIRED)
 
 set(MNN_ROOT "" CACHE PATH "Installed MNN 3.6.1 runtime prefix")
-find_path(MNN_INCLUDE_DIR
-    NAMES MNN/Interpreter.hpp
-    HINTS "${MNN_ROOT}/include"
-    NO_CMAKE_FIND_ROOT_PATH
-    REQUIRED)
-find_library(MNN_LIBRARY
-    NAMES MNN libMNN
-    HINTS "${MNN_ROOT}/lib"
-    NO_CMAKE_FIND_ROOT_PATH
-    REQUIRED)
+if(MNN_ROOT STREQUAL "")
+    message(FATAL_ERROR "MNN_ROOT must point to the pinned MNN 3.6.1 install prefix")
+endif()
+get_filename_component(MNN_ROOT_ABSOLUTE "${MNN_ROOT}" ABSOLUTE)
+set(MNN_INCLUDE_DIR "${MNN_ROOT_ABSOLUTE}/include")
+set(MNN_LIBRARY "${MNN_ROOT_ABSOLUTE}/lib/libMNN.a")
+if(NOT EXISTS "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp")
+    message(FATAL_ERROR "MNN 3.6.1 headers not found under ${MNN_INCLUDE_DIR}")
+endif()
+if(NOT EXISTS "${MNN_LIBRARY}" OR IS_DIRECTORY "${MNN_LIBRARY}")
+    message(FATAL_ERROR "Pinned static MNN archive not found: ${MNN_LIBRARY}")
+endif()
 add_library(MNNRuntime STATIC IMPORTED)
 set_target_properties(MNNRuntime PROPERTIES
     IMPORTED_LOCATION "${MNN_LIBRARY}"
@@ -114,6 +116,12 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_normalization_model_compare tests/normalization_model_compare.cpp)
     target_link_libraries(eggvision_normalization_model_compare PRIVATE eggvision_core)
 
+    add_test(NAME eggvision_install_layout
+        COMMAND ${CMAKE_COMMAND}
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DSTAGE_DIR=${CMAKE_BINARY_DIR}/install-layout-test
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_install_layout.cmake)
+
     if(EGGVISION_ENABLE_TEST_HOOKS)
         # Hardware integration harness: run manually on a Pi with a camera.
         # It reuses one RtspServer across normal and fault-rollback epochs.
@@ -129,3 +137,7 @@ if(EGGVISION_BUILD_TESTS)
 endif()
 
 install(TARGETS eggvision_app RUNTIME DESTINATION bin)
+install(FILES THIRD_PARTY_NOTICES.md DESTINATION share/doc/eggvision)
+install(DIRECTORY third_party/
+    DESTINATION share/licenses/eggvision
+    FILES_MATCHING PATTERN "MNN*-LICENSE.txt")
