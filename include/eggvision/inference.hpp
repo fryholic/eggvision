@@ -56,6 +56,7 @@ public:
 
     bool initialize();
     bool start();
+    const std::string &modelSha256() const noexcept;
     void setDetectionConsumer(DetectionConsumer consumer);
     void submit(std::shared_ptr<FrameLease> frame);
     void stop();
@@ -70,6 +71,7 @@ private:
     AppConfig config_;
     Metrics &metrics_;
     std::unique_ptr<InferenceBackend> backend_;
+    std::string model_sha256_;
     DetectionConsumer detection_consumer_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
     std::thread worker_;

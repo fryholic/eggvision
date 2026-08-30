@@ -21,13 +21,13 @@ struct AppConfig {
     unsigned gop = 12;
 
     bool inference_enabled = true;
-    std::string inference_backend = "openvino";
-    std::string model_path = "models/yolov5n.xml";
+    std::string inference_backend = "mnn";
+    std::string model_path = "models/yolov5n.mnn";
     float confidence_threshold = 0.30F;
     float nms_threshold = 0.45F;
     unsigned inference_width = 320;
     unsigned inference_height = 320;
-    unsigned inference_threads = 2;
+    unsigned inference_threads = 3;
 
     bool event_recording_enabled = true;
     std::string events_dir = "/var/lib/eggvision/events";

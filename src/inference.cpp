@@ -6,13 +6,16 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
 
 #include <opencv2/imgproc.hpp>
+#include <glib.h>
 
 namespace eggvision {
 namespace {
@@ -61,6 +64,37 @@ void recordI420Rejection(Metrics &metrics, CompactI420Status status) {
             metrics.inference_i420_mapping_too_short.fetch_add(1);
             return;
     }
+}
+
+std::string sha256File(const std::string &path) {
+    struct ChecksumDeleter {
+        void operator()(GChecksum *checksum) const noexcept {
+            g_checksum_free(checksum);
+        }
+    };
+    std::unique_ptr<GChecksum, ChecksumDeleter> checksum(
+        g_checksum_new(G_CHECKSUM_SHA256));
+    if (!checksum) {
+        throw std::runtime_error("cannot create SHA-256 checksum");
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("cannot open model for SHA-256: " + path);
+    }
+    char buffer[64 * 1024];
+    while (input) {
+        input.read(buffer, sizeof(buffer));
+        const std::streamsize count = input.gcount();
+        if (count > 0) {
+            g_checksum_update(checksum.get(),
+                              reinterpret_cast<const guchar *>(buffer),
+                              static_cast<gsize>(count));
+        }
+    }
+    if (!input.eof()) {
+        throw std::runtime_error("cannot read model for SHA-256: " + path);
+    }
+    return g_checksum_get_string(checksum.get());
 }
 
 }  // namespace
@@ -160,6 +194,7 @@ bool InferenceWorker::initialize() {
             std::cerr << "[inference] model not found: " << config_.model_path << '\n';
             return false;
         }
+        model_sha256_ = sha256File(config_.model_path);
         backend_ = createInferenceBackend(config_.inference_backend);
         InferenceBackendConfig backend_config;
         backend_config.model_path = config_.model_path;
@@ -170,12 +205,14 @@ bool InferenceWorker::initialize() {
         if (!backend_->initialize(backend_config, error)) {
             std::cerr << "[inference] " << backend_->name()
                       << " initialization failed: " << error << '\n';
+            metrics_.inference_backend_errors.fetch_add(1);
             backend_.reset();
             return false;
         }
         initialized_.store(true);
         std::cout << "[inference] backend=" << backend_->name()
                   << " model=" << config_.model_path
+                  << " model_sha256=" << model_sha256_
                   << " input=[1,3," << config_.inference_height << ','
                   << config_.inference_width << "] output=[1,6300,85]"
                   << " device=CPU threads=" << config_.inference_threads << '\n';
@@ -184,6 +221,10 @@ bool InferenceWorker::initialize() {
         std::cerr << "[inference] initialization failed: " << error.what() << '\n';
         return false;
     }
+}
+
+const std::string &InferenceWorker::modelSha256() const noexcept {
+    return model_sha256_;
 }
 
 bool InferenceWorker::start() {
@@ -245,6 +286,7 @@ std::vector<Detection> InferenceWorker::infer(const cv::Mat &bgr,
 
     std::string inference_error;
     if (!backend_->run(inference_error)) {
+        metrics_.inference_backend_errors.fetch_add(1);
         throw std::runtime_error("inference backend failed: " + inference_error);
     }
     const auto inference_end = Clock::now();
