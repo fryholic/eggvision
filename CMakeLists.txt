@@ -28,6 +28,22 @@ find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
 find_package(Threads REQUIRED)
 
+set(MNN_ROOT "" CACHE PATH "Installed MNN 3.6.1 runtime prefix")
+find_path(MNN_INCLUDE_DIR
+    NAMES MNN/Interpreter.hpp
+    HINTS "${MNN_ROOT}/include"
+    NO_CMAKE_FIND_ROOT_PATH
+    REQUIRED)
+find_library(MNN_LIBRARY
+    NAMES MNN libMNN
+    HINTS "${MNN_ROOT}/lib"
+    NO_CMAKE_FIND_ROOT_PATH
+    REQUIRED)
+add_library(MNNRuntime STATIC IMPORTED)
+set_target_properties(MNNRuntime PROPERTIES
+    IMPORTED_LOCATION "${MNN_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${MNN_INCLUDE_DIR}")
+
 add_library(eggvision_core
     src/camera_capture.cpp
     src/dma_buf_sync.cpp
@@ -38,6 +54,7 @@ add_library(eggvision_core
     src/i420.cpp
     src/inference.cpp
     src/inference_backend.cpp
+    src/mnn_backend.cpp
     src/openvino_backend.cpp
     src/rtsp_server.cpp
     src/snapshot.cpp)
@@ -52,9 +69,11 @@ target_link_libraries(eggvision_core
     PUBLIC
         PkgConfig::LIBCAMERA
         PkgConfig::GSTREAMER
+        MNNRuntime
         openvino::runtime
         ${OpenCV_LIBS}
-        Threads::Threads)
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
 
 target_compile_options(eggvision_core PRIVATE -Wall -Wextra -Wpedantic)
 if(EGGVISION_PI4_TUNING)
