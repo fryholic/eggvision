@@ -111,6 +111,10 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_inference_backend_compare tests/inference_backend_compare.cpp)
     target_link_libraries(eggvision_inference_backend_compare PRIVATE eggvision_core)
 
+    add_executable(eggvision_tensor_comparison_tests tests/tensor_comparison_test.cpp)
+    target_include_directories(eggvision_tensor_comparison_tests PRIVATE tests)
+    add_test(NAME eggvision_tensor_comparison_tests COMMAND eggvision_tensor_comparison_tests)
+
     add_executable(eggvision_normalization_benchmark tests/normalization_benchmark.cpp)
     target_link_libraries(eggvision_normalization_benchmark PRIVATE eggvision_core)
 

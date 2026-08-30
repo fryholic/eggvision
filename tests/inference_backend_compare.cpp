@@ -1,5 +1,6 @@
 #include "eggvision/inference.hpp"
 #include "eggvision/inference_backend.hpp"
+#include "tensor_comparison.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -121,39 +122,46 @@ int main(int argc, char **argv) {
             }
         }
 
-        float reference_max_absolute = 0.0F;
-        std::size_t reference_different_bits = 0;
+        ExactTensorComparison reference_comparison;
         if (argc == 5) {
             const std::vector<float> reference = readTensor(argv[4]);
             const std::size_t output_size = mnn_output.rows * mnn_output.fields;
             if (reference.size() != output_size) {
                 throw std::runtime_error("MNN reference output size mismatch");
             }
-            for (std::size_t index = 0; index < output_size; ++index) {
-                reference_max_absolute = std::max(
-                    reference_max_absolute,
-                    std::fabs(reference[index] - mnn_output.data[index]));
-                if (std::memcmp(reference.data() + index,
-                                mnn_output.data + index,
-                                sizeof(float)) != 0) {
-                    ++reference_different_bits;
-                }
-            }
+            reference_comparison =
+                compareExactTensors(reference.data(), mnn_output.data, output_size);
+        }
+
+        bool backend_outputs_finite = true;
+        const std::size_t output_size = openvino_output.rows * openvino_output.fields;
+        for (std::size_t index = 0; index < output_size; ++index) {
+            backend_outputs_finite = backend_outputs_finite &&
+                                     std::isfinite(openvino_output.data[index]) &&
+                                     std::isfinite(mnn_output.data[index]);
         }
 
         const bool detections_match =
             openvino_detections.size() == mnn_detections.size() &&
             max_box_difference <= 1.0F && max_confidence_difference <= 0.005F;
-        const bool reference_matches = argc != 5 || reference_max_absolute <= 1.0e-6F;
+        const bool reference_matches =
+            argc != 5 || (reference_comparison.all_finite &&
+                          reference_comparison.different_bits == 0);
         std::cout << std::fixed << std::setprecision(9)
                   << "{\"openvino_detections\":" << openvino_detections.size()
                   << ",\"mnn_detections\":" << mnn_detections.size()
                   << ",\"max_box_difference\":" << max_box_difference
                   << ",\"max_confidence_difference\":" << max_confidence_difference
-                  << ",\"mnn_reference_max_absolute\":" << reference_max_absolute
-                  << ",\"mnn_reference_different_bits\":" << reference_different_bits
+                  << ",\"backend_outputs_finite\":"
+                  << (backend_outputs_finite ? "true" : "false")
+                  << ",\"mnn_reference_max_absolute\":"
+                  << reference_comparison.max_absolute
+                  << ",\"mnn_reference_different_bits\":"
+                  << reference_comparison.different_bits
+                  << ",\"mnn_reference_all_finite\":"
+                  << (reference_comparison.all_finite ? "true" : "false")
                   << "}\n";
-        return detections_match && reference_matches ? 0 : 1;
+        return detections_match && reference_matches && backend_outputs_finite ? 0 : 1;
     } catch (const std::exception &exception) {
         std::cerr << "inference backend comparison failed: " << exception.what() << '\n';
         return 1;

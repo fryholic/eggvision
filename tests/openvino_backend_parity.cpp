@@ -1,4 +1,5 @@
 #include "eggvision/inference_backend.hpp"
+#include "tensor_comparison.hpp"
 
 #include <openvino/openvino.hpp>
 
@@ -87,24 +88,17 @@ int main(int argc, char **argv) {
             throw std::runtime_error("adapter output contract mismatch");
         }
         const float *legacy_data = legacy_output.data<float>();
-        double absolute_sum = 0.0;
-        float max_absolute = 0.0F;
-        std::size_t different_bits = 0;
-        for (std::size_t i = 0; i < adapter_size; ++i) {
-            const float absolute = std::fabs(adapter_output.data[i] - legacy_data[i]);
-            absolute_sum += absolute;
-            max_absolute = std::max(max_absolute, absolute);
-            if (std::memcmp(adapter_output.data + i, legacy_data + i, sizeof(float)) != 0) {
-                ++different_bits;
-            }
-        }
+        const ExactTensorComparison comparison =
+            compareExactTensors(adapter_output.data, legacy_data, adapter_size);
 
         std::cout << std::fixed << std::setprecision(9)
                   << "{\"backend\":\"openvino\",\"elements\":" << adapter_size
-                  << ",\"max_absolute\":" << max_absolute
-                  << ",\"mean_absolute\":" << absolute_sum / adapter_size
-                  << ",\"different_bits\":" << different_bits << "}\n";
-        return max_absolute <= 1.0e-6F ? 0 : 1;
+                  << ",\"max_absolute\":" << comparison.max_absolute
+                  << ",\"mean_absolute\":" << comparison.absolute_sum / adapter_size
+                  << ",\"different_bits\":" << comparison.different_bits
+                  << ",\"all_finite\":" << (comparison.all_finite ? "true" : "false")
+                  << "}\n";
+        return comparison.all_finite && comparison.different_bits == 0 ? 0 : 1;
     } catch (const std::exception &exception) {
         std::cerr << "openvino backend parity failed: " << exception.what() << '\n';
         return 1;
