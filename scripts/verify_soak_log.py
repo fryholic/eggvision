@@ -119,27 +119,30 @@ def verify_resource_stability(resource_log, duration):
     tail = samples[-window_size:]
     baseline_rss = statistics.median(sample["rss_kb"] for sample in baseline)
     tail_rss = statistics.median(sample["rss_kb"] for sample in tail)
+    tail_rss_max = max(sample["rss_kb"] for sample in tail)
     rss_growth_limit = max(
         RESOURCE_RSS_GROWTH_FLOOR_KB,
         baseline_rss * RESOURCE_RSS_GROWTH_RATIO,
     )
-    if tail_rss - baseline_rss > rss_growth_limit:
+    if tail_rss_max - baseline_rss > rss_growth_limit:
         raise RuntimeError(
             "RSS growth exceeded: "
-            f"baseline={baseline_rss:.1f} KiB tail={tail_rss:.1f} KiB "
+            f"baseline={baseline_rss:.1f} KiB tail_max={tail_rss_max} KiB "
             f"limit={rss_growth_limit:.1f} KiB"
         )
 
     baseline_fd = statistics.median(sample["fd_count"] for sample in baseline)
     tail_fd = statistics.median(sample["fd_count"] for sample in tail)
+    tail_fd_max = max(sample["fd_count"] for sample in tail)
     fd_growth_limit = max(
         RESOURCE_FD_GROWTH_FLOOR,
         baseline_fd * RESOURCE_FD_GROWTH_RATIO,
     )
-    if tail_fd - baseline_fd > fd_growth_limit:
+    if tail_fd_max - baseline_fd > fd_growth_limit:
         raise RuntimeError(
             "FD growth exceeded: "
-            f"baseline={baseline_fd:.1f} tail={tail_fd:.1f} limit={fd_growth_limit:.1f}"
+            f"baseline={baseline_fd:.1f} tail_max={tail_fd_max} "
+            f"limit={fd_growth_limit:.1f}"
         )
 
     return {
@@ -147,9 +150,13 @@ def verify_resource_stability(resource_log, duration):
         "resource_coverage_seconds": coverage,
         "rss_baseline_kb": baseline_rss,
         "rss_tail_kb": tail_rss,
+        "rss_tail_max_kb": tail_rss_max,
+        "rss_final_kb": samples[-1]["rss_kb"],
         "rss_peak_kb": max(sample["rss_kb"] for sample in samples),
         "fd_baseline": baseline_fd,
         "fd_tail": tail_fd,
+        "fd_tail_max": tail_fd_max,
+        "fd_final": samples[-1]["fd_count"],
         "fd_peak": max(sample["fd_count"] for sample in samples),
         "minimum_temperature_c": min(sample["temperature"] for sample in samples),
         "maximum_temperature_c": max(sample["temperature"] for sample in samples),

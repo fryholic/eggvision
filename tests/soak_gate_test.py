@@ -133,6 +133,16 @@ def main():
     def runaway_fd(_metrics, resources, _extra):
         resources[-1] = resources[-1].replace("fd_count=60", "fd_count=100")
 
+    def late_rss_growth(_metrics, resources, _extra):
+        for index in (-2, -1):
+            resources[index] = resources[index].replace(
+                "rss_kb=70000", "rss_kb=200000"
+            )
+
+    def late_fd_growth(_metrics, resources, _extra):
+        for index in (-2, -1):
+            resources[index] = resources[index].replace("fd_count=60", "fd_count=100")
+
     def rss_ceiling(_metrics, resources, _extra):
         resources[-1] = resources[-1].replace("rss_kb=70000", "rss_kb=600000")
 
@@ -184,6 +194,16 @@ def main():
         ),
         ("RSS growth", run_case(verifier, runaway_rss), "RSS growth exceeded"),
         ("FD growth", run_case(verifier, runaway_fd), "FD growth exceeded"),
+        (
+            "late RSS growth",
+            run_case(verifier, late_rss_growth, duration=1800),
+            "RSS growth exceeded",
+        ),
+        (
+            "late FD growth",
+            run_case(verifier, late_fd_growth, duration=1800),
+            "FD growth exceeded",
+        ),
         ("RSS ceiling", run_case(verifier, rss_ceiling), "RSS ceiling exceeded"),
         ("FD ceiling", run_case(verifier, fd_ceiling), "FD ceiling exceeded"),
         (
