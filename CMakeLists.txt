@@ -37,6 +37,8 @@ add_library(eggvision_core
     src/h264_encoder.cpp
     src/i420.cpp
     src/inference.cpp
+    src/inference_backend.cpp
+    src/openvino_backend.cpp
     src/rtsp_server.cpp
     src/snapshot.cpp)
 

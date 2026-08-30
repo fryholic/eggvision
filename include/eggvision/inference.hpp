@@ -2,6 +2,7 @@
 
 #include "eggvision/config.hpp"
 #include "eggvision/frame.hpp"
+#include "eggvision/inference_backend.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 #include "eggvision/metrics.hpp"
 
@@ -13,8 +14,6 @@
 #include <vector>
 
 #include <opencv2/core.hpp>
-#include <openvino/openvino.hpp>
-
 namespace eggvision {
 
 struct LetterboxTransform {
@@ -70,10 +69,7 @@ private:
 
     AppConfig config_;
     Metrics &metrics_;
-    ov::Core core_;
-    std::shared_ptr<ov::Model> model_;
-    ov::CompiledModel compiled_model_;
-    ov::InferRequest infer_request_;
+    std::unique_ptr<InferenceBackend> backend_;
     DetectionConsumer detection_consumer_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
     std::thread worker_;

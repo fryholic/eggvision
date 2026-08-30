@@ -160,25 +160,24 @@ bool InferenceWorker::initialize() {
             std::cerr << "[inference] model not found: " << config_.model_path << '\n';
             return false;
         }
-        model_ = core_.read_model(config_.model_path);
-        const auto input_shape = model_->input().get_shape();
-        const auto output_shape = model_->output().get_shape();
-        const ov::Shape expected_input{1, 3, config_.inference_height, config_.inference_width};
-        if (input_shape != expected_input || output_shape.size() != 3 || output_shape[0] != 1 ||
-            output_shape[2] < 6) {
-            std::cerr << "[inference] unexpected model shapes input=" << input_shape
-                      << " output=" << output_shape << '\n';
+        backend_ = createInferenceBackend(config_.inference_backend);
+        InferenceBackendConfig backend_config;
+        backend_config.model_path = config_.model_path;
+        backend_config.input_width = config_.inference_width;
+        backend_config.input_height = config_.inference_height;
+        backend_config.threads = config_.inference_threads;
+        std::string error;
+        if (!backend_->initialize(backend_config, error)) {
+            std::cerr << "[inference] " << backend_->name()
+                      << " initialization failed: " << error << '\n';
+            backend_.reset();
             return false;
         }
-        ov::AnyMap properties{
-            {ov::hint::performance_mode.name(), ov::hint::PerformanceMode::LATENCY},
-            {ov::inference_num_threads.name(), static_cast<int>(config_.inference_threads)},
-        };
-        compiled_model_ = core_.compile_model(model_, "CPU", properties);
-        infer_request_ = compiled_model_.create_infer_request();
         initialized_.store(true);
-        std::cout << "[inference] OpenVINO model=" << config_.model_path
-                  << " input=" << input_shape << " output=" << output_shape
+        std::cout << "[inference] backend=" << backend_->name()
+                  << " model=" << config_.model_path
+                  << " input=[1,3," << config_.inference_height << ','
+                  << config_.inference_width << "] output=[1,6300,85]"
                   << " device=CPU threads=" << config_.inference_threads << '\n';
         return true;
     } catch (const std::exception &error) {
@@ -235,21 +234,28 @@ std::vector<Detection> InferenceWorker::infer(const cv::Mat &bgr,
                                         transform.resized_width,
                                         transform.resized_height)));
 
-    ov::Tensor input = infer_request_.get_input_tensor();
-    float *tensor = input.data<float>();
-    bgrToNormalizedRgbChw(letterboxed, tensor);
+    MutableInferenceTensor input = backend_->inputTensor();
+    const std::size_t expected_input_size =
+        static_cast<std::size_t>(3) * config_.inference_width * config_.inference_height;
+    if (!input || input.size != expected_input_size) {
+        throw std::runtime_error("inference backend returned an invalid input tensor");
+    }
+    bgrToNormalizedRgbChw(letterboxed, input.data);
     const auto preprocess_end = Clock::now();
 
-    infer_request_.infer();
+    std::string inference_error;
+    if (!backend_->run(inference_error)) {
+        throw std::runtime_error("inference backend failed: " + inference_error);
+    }
     const auto inference_end = Clock::now();
 
-    ov::Tensor output = infer_request_.get_output_tensor();
-    const auto shape = output.get_shape();
-    const float *data = output.data<float>();
-    const std::size_t fields = shape[2];
+    const InferenceTensor output = backend_->outputTensor();
+    if (!output || output.fields < 6) {
+        throw std::runtime_error("inference backend returned an invalid output tensor");
+    }
     std::vector<Detection> detections;
-    for (std::size_t i = 0; i < shape[1]; ++i) {
-        const float *row = data + i * fields;
+    for (std::size_t i = 0; i < output.rows; ++i) {
+        const float *row = output.data + i * output.fields;
         const float confidence = row[4] * row[5];  // COCO class 0: person.
         if (confidence < config_.confidence_threshold) {
             continue;
