@@ -94,6 +94,7 @@ target_link_libraries(eggvision_app PRIVATE eggvision_core)
 
 if(EGGVISION_BUILD_TESTS)
     enable_testing()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(eggvision_tests tests/test_core.cpp)
     target_link_libraries(eggvision_tests PRIVATE eggvision_core)
     add_test(NAME eggvision_core_tests COMMAND eggvision_tests)
@@ -114,6 +115,10 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_tensor_comparison_tests tests/tensor_comparison_test.cpp)
     target_include_directories(eggvision_tensor_comparison_tests PRIVATE tests)
     add_test(NAME eggvision_tensor_comparison_tests COMMAND eggvision_tensor_comparison_tests)
+    add_test(NAME eggvision_soak_gate_tests
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/soak_gate_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_soak_log.py)
 
     add_executable(eggvision_normalization_benchmark tests/normalization_benchmark.cpp)
     target_link_libraries(eggvision_normalization_benchmark PRIVATE eggvision_core)

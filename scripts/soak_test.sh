@@ -6,6 +6,7 @@ duration="${1:-1800}"
 log="${2:-soak-$(date +%Y%m%d-%H%M%S).log}"
 events_dir="${3:-/tmp/eggvision-soak-events-$(date +%Y%m%d-%H%M%S)}"
 resource_log="${log}.resources"
+client_log="${log}.client"
 app="${EGGVISION_APP:-./build/eggvision_app}"
 backend="${EGGVISION_BACKEND:-mnn}"
 case "$backend" in
@@ -39,7 +40,14 @@ stdbuf -oL -eL "$app" --duration "$duration" \
   --inference-backend "$backend" --model "$model" --inference-threads "$threads" \
   --events-dir "$events_dir" --event-min-free-bytes 1048576 >"$log" 2>&1 &
 app_pid=$!
-trap 'kill -TERM "$app_pid" 2>/dev/null || true' EXIT
+monitor_pid=""
+client_pid=""
+cleanup() {
+  [[ -z "$client_pid" ]] || kill -INT "$client_pid" 2>/dev/null || true
+  kill -TERM "$app_pid" 2>/dev/null || true
+  [[ -z "$monitor_pid" ]] || wait "$monitor_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 for _ in {1..30}; do
   if grep -q '\[camera\] capture started' "$log"; then
@@ -65,7 +73,43 @@ monitor_pid=$!
 python3 ./scripts/rtsp_lifecycle_test.py \
   rtsp://127.0.0.1:8554/stream --cycles 30 --settle-ms 0 --timeout 10
 ./scripts/verify_rtsp.sh rtsp://127.0.0.1:8554/stream 3 10
+remaining="$(( duration - ($(date +%s) - started_epoch) + 30 ))"
+if (( remaining < 10 )); then
+  echo "insufficient time remains for sustained RTSP verification" >&2
+  exit 1
+fi
+set +e
+timeout --signal=INT "$remaining" gst-launch-1.0 -q \
+  rtspsrc location=rtsp://127.0.0.1:8554/stream protocols=tcp latency=100 \
+  ! rtph264depay ! h264parse ! fakesink sync=false >"$client_log" 2>&1 &
+client_pid=$!
+set -e
+while kill -0 "$app_pid" 2>/dev/null; do
+  if ! kill -0 "$client_pid" 2>/dev/null; then
+    set +e
+    wait "$client_pid"
+    client_status=$?
+    set -e
+    client_pid=""
+    echo "sustained RTSP client ended before the application: $client_status" >&2
+    exit 1
+  fi
+  sleep 2
+done
 wait "$app_pid"
+if kill -0 "$client_pid" 2>/dev/null; then
+  kill -INT "$client_pid" 2>/dev/null || true
+fi
+set +e
+wait "$client_pid"
+client_status=$?
+set -e
+client_pid=""
+if [[ $client_status -ne 0 && $client_status -ne 124 &&
+      $client_status -ne 130 && $client_status -ne 143 ]]; then
+  echo "sustained RTSP client shutdown failed with status $client_status" >&2
+  exit 1
+fi
 wait "$monitor_pid" || true
 trap - EXIT
 after_throttled="$(vcgencmd get_throttled)"
@@ -100,12 +144,7 @@ zero_copy="$(sed -n 's/.* inference_zero_copy=\([0-9][0-9]*\).*/\1/p' <<<"$final
   echo "soak test did not preserve 100% compact-I420 ingress: ${final_line}" >&2
   exit 1
 }
-for throttled in "$before_throttled" "$after_throttled"; do
-  value="${throttled#throttled=0x}"
-  (( (16#$value & 0xF) == 0 )) || {
-    echo "current throttling detected: ${throttled}" >&2
-    exit 1
-  }
-done
+python3 ./scripts/verify_soak_log.py \
+  "$log" "$resource_log" "$duration" "$before_throttled" "$after_throttled"
 echo "soak test passed: backend=$backend model=$model log=$log " \
-  "(resources: $resource_log, events: $events_dir)"
+  "(resources: $resource_log, client: $client_log, events: $events_dir)"
