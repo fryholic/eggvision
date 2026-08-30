@@ -105,6 +105,9 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_openvino_backend_parity tests/openvino_backend_parity.cpp)
     target_link_libraries(eggvision_openvino_backend_parity PRIVATE eggvision_core)
 
+    add_executable(eggvision_inference_backend_compare tests/inference_backend_compare.cpp)
+    target_link_libraries(eggvision_inference_backend_compare PRIVATE eggvision_core)
+
     add_executable(eggvision_normalization_benchmark tests/normalization_benchmark.cpp)
     target_link_libraries(eggvision_normalization_benchmark PRIVATE eggvision_core)
 
