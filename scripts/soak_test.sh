@@ -59,9 +59,19 @@ grep -q '\[camera\] capture started' "$log" || { echo "application did not start
 
 (
   while kill -0 "$app_pid" 2>/dev/null; do
+    if [[ ! -r "/proc/$app_pid/status" || ! -d "/proc/$app_pid/fd" ]]; then
+      break
+    fi
     timestamp="$(date --iso-8601=seconds)"
-    rss_kb="$(awk '/VmRSS/{print $2}' /proc/$app_pid/status)"
-    fd_count="$(find /proc/$app_pid/fd -mindepth 1 -maxdepth 1 | wc -l)"
+    rss_kb="$(awk '/VmRSS/{print $2}' "/proc/$app_pid/status" || true)"
+    fd_count="$(find "/proc/$app_pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l || true)"
+    if [[ -z "$rss_kb" || ! "$fd_count" =~ ^[0-9]+$ ]]; then
+      if ! kill -0 "$app_pid" 2>/dev/null; then
+        break
+      fi
+      echo "resource monitor failed to read process state" >&2
+      exit 1
+    fi
     temperature="$(vcgencmd measure_temp)"
     throttled="$(vcgencmd get_throttled)"
     echo "$timestamp rss_kb=$rss_kb fd_count=$fd_count $temperature $throttled"
@@ -110,7 +120,10 @@ if [[ $client_status -ne 0 && $client_status -ne 124 &&
   echo "sustained RTSP client shutdown failed with status $client_status" >&2
   exit 1
 fi
-wait "$monitor_pid" || true
+if ! wait "$monitor_pid"; then
+  echo "resource monitor exited with an error" >&2
+  exit 1
+fi
 trap - EXIT
 after_throttled="$(vcgencmd get_throttled)"
 elapsed="$(( $(date +%s) - started_epoch ))"
