@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(eggvision VERSION 1.0.0 LANGUAGES CXX)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(ValidateStaticArchive)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -28,6 +31,25 @@ find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
 find_package(Threads REQUIRED)
 
+set(MNN_ROOT "" CACHE PATH "Installed MNN 3.6.1 runtime prefix")
+if(MNN_ROOT STREQUAL "")
+    message(FATAL_ERROR "MNN_ROOT must point to the pinned MNN 3.6.1 install prefix")
+endif()
+get_filename_component(MNN_ROOT_ABSOLUTE "${MNN_ROOT}" ABSOLUTE)
+set(MNN_INCLUDE_DIR "${MNN_ROOT_ABSOLUTE}/include")
+set(MNN_LIBRARY "${MNN_ROOT_ABSOLUTE}/lib/libMNN.a")
+if(NOT EXISTS "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp")
+    message(FATAL_ERROR "MNN 3.6.1 headers not found under ${MNN_INCLUDE_DIR}")
+endif()
+if(NOT EXISTS "${MNN_LIBRARY}" OR IS_DIRECTORY "${MNN_LIBRARY}")
+    message(FATAL_ERROR "Pinned static MNN archive not found: ${MNN_LIBRARY}")
+endif()
+eggvision_validate_static_archive("${MNN_LIBRARY}" "Pinned MNN runtime")
+add_library(MNNRuntime STATIC IMPORTED)
+set_target_properties(MNNRuntime PROPERTIES
+    IMPORTED_LOCATION "${MNN_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${MNN_INCLUDE_DIR}")
+
 add_library(eggvision_core
     src/camera_capture.cpp
     src/dma_buf_sync.cpp
@@ -37,6 +59,10 @@ add_library(eggvision_core
     src/h264_encoder.cpp
     src/i420.cpp
     src/inference.cpp
+    src/inference_backend.cpp
+    src/logging.cpp
+    src/mnn_backend.cpp
+    src/openvino_backend.cpp
     src/rtsp_server.cpp
     src/snapshot.cpp)
 
@@ -50,9 +76,11 @@ target_link_libraries(eggvision_core
     PUBLIC
         PkgConfig::LIBCAMERA
         PkgConfig::GSTREAMER
+        MNNRuntime
         openvino::runtime
         ${OpenCV_LIBS}
-        Threads::Threads)
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
 
 target_compile_options(eggvision_core PRIVATE -Wall -Wextra -Wpedantic)
 if(EGGVISION_PI4_TUNING)
@@ -67,9 +95,20 @@ endif()
 
 add_executable(eggvision_app app/main.cpp)
 target_link_libraries(eggvision_app PRIVATE eggvision_core)
+if(NOT CMAKE_READELF OR CMAKE_READELF MATCHES "-NOTFOUND$")
+    message(FATAL_ERROR "readelf is required to verify the static MNN deployment contract")
+endif()
+add_custom_command(TARGET eggvision_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -DBINARY_PATH=$<TARGET_FILE:eggvision_app>
+        -DREADELF_EXECUTABLE=${CMAKE_READELF}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNoMnnSharedDependency.cmake
+    COMMENT "Verifying that eggvision_app has no shared MNN dependency"
+    VERBATIM)
 
 if(EGGVISION_BUILD_TESTS)
     enable_testing()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(eggvision_tests tests/test_core.cpp)
     target_link_libraries(eggvision_tests PRIVATE eggvision_core)
     add_test(NAME eggvision_core_tests COMMAND eggvision_tests)
@@ -81,11 +120,49 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_model_smoke tests/model_smoke.cpp)
     target_link_libraries(eggvision_model_smoke PRIVATE openvino::runtime Threads::Threads)
 
+    add_executable(eggvision_openvino_backend_parity tests/openvino_backend_parity.cpp)
+    target_link_libraries(eggvision_openvino_backend_parity PRIVATE eggvision_core)
+
+    add_executable(eggvision_inference_backend_compare tests/inference_backend_compare.cpp)
+    target_link_libraries(eggvision_inference_backend_compare PRIVATE eggvision_core)
+
+    add_executable(eggvision_tensor_comparison_tests tests/tensor_comparison_test.cpp)
+    target_include_directories(eggvision_tensor_comparison_tests PRIVATE tests)
+    add_test(NAME eggvision_tensor_comparison_tests COMMAND eggvision_tensor_comparison_tests)
+    add_test(NAME eggvision_soak_gate_tests
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/soak_gate_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_soak_log.py)
+
+    add_library(eggvision_mnn_shared_fixture SHARED tests/mnn_shared_fixture.cpp)
+    set_target_properties(eggvision_mnn_shared_fixture PROPERTIES
+        OUTPUT_NAME "MNN-shared-fixture")
+    add_test(NAME eggvision_mnn_archive_validation
+        COMMAND ${CMAKE_COMMAND}
+            -DTEST_ROOT=${CMAKE_BINARY_DIR}/mnn-archive-validation-test
+            -DMNN_ARCHIVE=${MNN_LIBRARY}
+            -DSHARED_FIXTURE=$<TARGET_FILE:eggvision_mnn_shared_fixture>
+            -DAR_EXECUTABLE=${CMAKE_AR}
+            -DVALIDATOR_MODULE=${CMAKE_CURRENT_SOURCE_DIR}/cmake/ValidateStaticArchive.cmake
+            -DVALIDATION_ENTRYPOINT=${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mnn_archive_validation.cmake
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_mnn_archive_validation.cmake)
+    add_test(NAME eggvision_no_mnn_shared_dependency
+        COMMAND ${CMAKE_COMMAND}
+            -DBINARY_PATH=$<TARGET_FILE:eggvision_app>
+            -DREADELF_EXECUTABLE=${CMAKE_READELF}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNoMnnSharedDependency.cmake)
+
     add_executable(eggvision_normalization_benchmark tests/normalization_benchmark.cpp)
     target_link_libraries(eggvision_normalization_benchmark PRIVATE eggvision_core)
 
     add_executable(eggvision_normalization_model_compare tests/normalization_model_compare.cpp)
     target_link_libraries(eggvision_normalization_model_compare PRIVATE eggvision_core)
+
+    add_test(NAME eggvision_install_layout
+        COMMAND ${CMAKE_COMMAND}
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DSTAGE_DIR=${CMAKE_BINARY_DIR}/install-layout-test
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_install_layout.cmake)
 
     if(EGGVISION_ENABLE_TEST_HOOKS)
         # Hardware integration harness: run manually on a Pi with a camera.
@@ -102,3 +179,7 @@ if(EGGVISION_BUILD_TESTS)
 endif()
 
 install(TARGETS eggvision_app RUNTIME DESTINATION bin)
+install(FILES THIRD_PARTY_NOTICES.md DESTINATION share/doc/eggvision)
+install(DIRECTORY third_party/
+    DESTINATION share/licenses/eggvision
+    FILES_MATCHING PATTERN "MNN*-LICENSE.txt")

@@ -1,0 +1,2 @@
+third_party/MNN-*-LICENSE.txt whitespace=-trailing-space,-blank-at-eof
+*.sh text eol=lf

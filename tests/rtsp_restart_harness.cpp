@@ -198,6 +198,7 @@ int main(int argc, char **argv) {
         }
 
         bool next_epoch_already_started = false;
+        GstElement *final_held_client = nullptr;
         for (unsigned epoch = 1; epoch <= target_epochs; ++epoch) {
             if (epoch == 1) {
                 std::atomic<bool> go{false};
@@ -228,10 +229,9 @@ int main(int argc, char **argv) {
                 throw std::runtime_error("concurrent/running start was not rejected");
             }
             GstElement *held_client = nullptr;
-            if (!receiveRtp(url,
-                            epoch == 1 && delayed_recovery_ms != 0
-                                ? &held_client
-                                : nullptr)) {
+            const bool hold_client =
+                (epoch == 1 && delayed_recovery_ms != 0) || epoch == target_epochs;
+            if (!receiveRtp(url, hold_client ? &held_client : nullptr)) {
                 throw std::runtime_error("RTP timeout at epoch " + std::to_string(epoch));
             }
             ++successful_epochs;
@@ -286,6 +286,17 @@ int main(int argc, char **argv) {
                           << elapsed.count() << '\n';
                 continue;
             }
+            if (epoch == target_epochs) {
+                final_held_client = held_client;
+                held_client = nullptr;
+                if (!waitUntil(
+                        [&metrics] { return metrics.rtsp_sessions_current.load() > 0; },
+                        std::chrono::seconds(2))) {
+                    stopRtp(final_held_client);
+                    throw std::runtime_error(
+                        "final active RTSP session was not reflected in metrics");
+                }
+            }
             if (epoch != target_epochs) {
                 std::atomic<bool> go{false};
                 bool restart_won = false;
@@ -311,9 +322,26 @@ int main(int argc, char **argv) {
             }
         }
 
+        server.stop();
+        if (metrics.rtsp_sessions_current.load() != 0) {
+            stopRtp(final_held_client);
+            throw std::runtime_error(
+                "active RTSP session remained after stop: " +
+                std::to_string(metrics.rtsp_sessions_current.load()));
+        }
+        stopRtp(final_held_client);
+        final_held_client = nullptr;
+        if (!server.start()) {
+            throw std::runtime_error("same-object restart failed after active-client stop");
+        }
+        server.stop();
+        if (metrics.rtsp_sessions_current.load() != 0) {
+            throw std::runtime_error(
+                "RTSP session count was not reset after restart stop: " +
+                std::to_string(metrics.rtsp_sessions_current.load()));
+        }
         camera.stop();
         encoder.stop();
-        server.stop();
         if (!waitUntil(
                 [&server] {
                     const auto bound = server.appsrcBoundForTest();

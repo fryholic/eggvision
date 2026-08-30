@@ -4,6 +4,7 @@
 #include "eggvision/event_recorder.hpp"
 #include "eggvision/h264_encoder.hpp"
 #include "eggvision/inference.hpp"
+#include "eggvision/logging.hpp"
 #include "eggvision/metrics.hpp"
 #include "eggvision/rtsp_server.hpp"
 
@@ -26,9 +27,10 @@ void signalHandler(int) {
 }
 
 void usage(const char *program) {
-    std::cout
+    eggvision::synchronizedLog(std::cout)
         << "Usage: " << program << " [options]\n"
-        << "  --model PATH          OpenVINO YOLOv5n XML (default models/yolov5n.xml)\n"
+        << "  --inference-backend NAME mnn or openvino (default mnn)\n"
+        << "  --model PATH          backend model (default yolov5n.mnn or yolov5n.xml)\n"
         << "  --port PORT           RTSP port (default 8554)\n"
         << "  --mount PATH          RTSP mount (default /stream)\n"
         << "  --max-rtsp-sessions N Maximum concurrent/pending RTSP sessions (default 32)\n"
@@ -36,7 +38,7 @@ void usage(const char *program) {
         << "  --gop N               H.264 GOP length (default 12)\n"
         << "  --confidence VALUE    person confidence threshold (default 0.30)\n"
         << "  --nms VALUE           NMS IoU threshold (default 0.45)\n"
-        << "  --inference-threads N OpenVINO CPU threads (default 2)\n"
+        << "  --inference-threads N CPU threads (default mnn=3, openvino=2)\n"
         << "  --events-dir PATH     event artifact root (default /var/lib/eggvision/events)\n"
         << "  --event-pre-seconds N event pre-roll duration (default 1.5)\n"
         << "  --event-post-seconds N event post-roll duration (default 1.5)\n"
@@ -48,12 +50,14 @@ void usage(const char *program) {
         << "  --event-container mp4|mkv container format (default mp4)\n"
         << "  --no-event-recording disable detection event artifacts\n"
         << "  --duration SECONDS    stop automatically; 0 means run until signal\n"
-        << "  --no-inference        stream without running OpenVINO\n"
+        << "  --no-inference        stream without running inference\n"
         << "  --help                show this help\n";
 }
 
 eggvision::AppConfig parseArguments(int argc, char **argv) {
     eggvision::AppConfig config;
+    bool model_overridden = false;
+    bool threads_overridden = false;
     auto value = [&](int &index) -> std::string {
         if (++index >= argc) {
             throw std::runtime_error(std::string("missing value after ") + argv[index - 1]);
@@ -62,8 +66,11 @@ eggvision::AppConfig parseArguments(int argc, char **argv) {
     };
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
-        if (argument == "--model") {
+        if (argument == "--inference-backend") {
+            config.inference_backend = value(i);
+        } else if (argument == "--model") {
             config.model_path = value(i);
+            model_overridden = true;
         } else if (argument == "--port") {
             config.rtsp_port = value(i);
         } else if (argument == "--mount") {
@@ -80,6 +87,7 @@ eggvision::AppConfig parseArguments(int argc, char **argv) {
             config.nms_threshold = std::stof(value(i));
         } else if (argument == "--inference-threads") {
             config.inference_threads = static_cast<unsigned>(std::stoul(value(i)));
+            threads_overridden = true;
         } else if (argument == "--events-dir") {
             config.events_dir = value(i);
         } else if (argument == "--event-pre-seconds") {
@@ -110,6 +118,16 @@ eggvision::AppConfig parseArguments(int argc, char **argv) {
         } else {
             throw std::runtime_error("unknown argument: " + argument);
         }
+    }
+    if (config.inference_backend != "mnn" && config.inference_backend != "openvino") {
+        throw std::runtime_error("--inference-backend must be mnn or openvino");
+    }
+    if (!model_overridden) {
+        config.model_path = config.inference_backend == "mnn" ? "models/yolov5n.mnn"
+                                                              : "models/yolov5n.xml";
+    }
+    if (!threads_overridden) {
+        config.inference_threads = config.inference_backend == "mnn" ? 3U : 2U;
     }
     if (config.rtsp_mount.empty() || config.rtsp_mount.front() != '/') {
         throw std::runtime_error("--mount must begin with '/'");
@@ -155,18 +173,19 @@ eggvision::AppConfig parseArguments(int argc, char **argv) {
 }
 
 void printConfiguration(const eggvision::AppConfig &config) {
-    std::cout << "[config] main=" << config.main_width << 'x' << config.main_height
+    eggvision::synchronizedLog(std::cout) << "[config] main=" << config.main_width << 'x' << config.main_height
               << " lores=" << config.lores_width << 'x' << config.lores_height
               << " fps=" << config.fps << " buffers=" << config.buffer_count
               << " rtsp=" << config.rtsp_address << ':' << config.rtsp_port << config.rtsp_mount
               << " max_rtsp_sessions=" << config.rtsp_max_sessions
               << " bitrate=" << config.bitrate << " gop=" << config.gop
               << " inference=" << (config.inference_enabled ? "on" : "off")
+              << " inference_backend=" << config.inference_backend
               << " model=" << config.model_path
               << " confidence=" << config.confidence_threshold
               << " nms=" << config.nms_threshold
               << " inference_threads=" << config.inference_threads << '\n';
-    std::cout << "[config] event_recording="
+    eggvision::synchronizedLog(std::cout) << "[config] event_recording="
               << (config.event_recording_enabled ? "on" : "off")
               << " events_dir=" << config.events_dir
               << " pre=" << config.event_pre_seconds
@@ -207,7 +226,7 @@ int main(int argc, char **argv) {
             const eggvision::EncodedRingPushResult result = encoded_history.push(unit);
             if (result == eggvision::EncodedRingPushResult::ResetForGeneration ||
                 result == eggvision::EncodedRingPushResult::ResetForTimestampRegression) {
-                std::cout << "{\"type\":\"encoded_ring_reset\",\"generation\":"
+                eggvision::synchronizedLog(std::cout) << "{\"type\":\"encoded_ring_reset\",\"generation\":"
                           << unit->generation << ",\"reason\":\""
                           << (result == eggvision::EncodedRingPushResult::ResetForGeneration
                                   ? "generation"
@@ -222,7 +241,7 @@ int main(int argc, char **argv) {
         std::uint64_t test_trigger_delay_ns = 0;
         if (const char *value = std::getenv("EGGVISION_EVENT_TEST_TRIGGER_AFTER_MS")) {
             test_trigger_delay_ns = std::stoull(value) * 1'000'000ULL;
-            std::cout << "[test-hook] deterministic event trigger after " << value << " ms\n";
+            eggvision::synchronizedLog(std::cout) << "[test-hook] deterministic event trigger after " << value << " ms\n";
         }
         std::atomic<std::uint64_t> test_first_sensor_timestamp_ns{0};
         std::atomic<bool> test_event_triggered{false};
@@ -274,7 +293,7 @@ int main(int argc, char **argv) {
             encoder.stop();
             event_recorder.stop();
             rtsp.stop();
-            std::cout << "[app] startup failed outstanding="
+            eggvision::synchronizedLog(std::cout) << "[app] startup failed outstanding="
                       << metrics.outstanding_leases.load()
                       << " encoder_errors=" << metrics.encoder_errors.load()
                       << " capture_errors=" << metrics.capture_errors.load()
@@ -294,18 +313,18 @@ int main(int argc, char **argv) {
         while (!exit_requested.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (encoder.recoveryRequested()) {
-                std::cout << "{\"type\":\"encoder_recovery_started\"}\n";
+                eggvision::synchronizedLog(std::cout) << "{\"type\":\"encoder_recovery_started\"}\n";
                 encoder.stop();
                 encoded_history.clear();
                 if (!encoder.initialize() || !encoder.start() ||
                     !encoder.waitForIndependentFrame(std::chrono::seconds(5))) {
                     metrics.encoder_recovery_failures.fetch_add(1);
-                    std::cerr << "{\"type\":\"encoder_recovery_failed\"}\n";
+                    eggvision::synchronizedLog(std::cerr) << "{\"type\":\"encoder_recovery_failed\"}\n";
                     fatal_encoder_failure = true;
                     break;
                 }
                 metrics.encoder_recoveries.fetch_add(1);
-                std::cout << "{\"type\":\"encoder_recovered\"}\n";
+                eggvision::synchronizedLog(std::cout) << "{\"type\":\"encoder_recovered\"}\n";
             }
             const auto now = std::chrono::steady_clock::now();
             if (config.duration_seconds > 0 &&
@@ -316,6 +335,8 @@ int main(int argc, char **argv) {
                 continue;
             }
             const double seconds = std::chrono::duration<double>(now - last_report).count();
+            const auto uptime_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count();
             const std::uint64_t captured = metrics.captured.load();
             const std::uint64_t pushed = metrics.rtsp_pushed.load();
             const std::uint64_t inferred = metrics.inference_processed.load();
@@ -327,9 +348,9 @@ int main(int argc, char **argv) {
                                                 ? 0.0
                                                 : metrics.inference_input_total_us.load() / 1000.0 /
                                                       inferred;
-            std::cout << std::fixed << std::setprecision(2)
-                      << "{\"type\":\"metrics\",\"capture_fps\":"
-                      << (captured - last_capture) / seconds
+            eggvision::synchronizedLog(std::cout) << std::fixed << std::setprecision(2)
+                      << "{\"type\":\"metrics\",\"uptime_ms\":" << uptime_ms
+                      << ",\"capture_fps\":" << (captured - last_capture) / seconds
                       << ",\"rtsp_fps\":" << (pushed - last_rtsp) / seconds
                       << ",\"inference_fps\":" << (inferred - last_inference) / seconds
                       << ",\"inference_avg_ms\":" << average_inference_ms
@@ -349,6 +370,9 @@ int main(int argc, char **argv) {
                       << metrics.encoder_recovery_failures.load()
                       << ",\"rtsp_dropped\":" << metrics.rtsp_dropped.load()
                       << ",\"inference_dropped\":" << metrics.inference_dropped.load()
+                      << ",\"inference_backend\":\"" << config.inference_backend << '\"'
+                      << ",\"inference_model_sha256\":\""
+                      << inference.modelSha256() << '\"'
                       << ",\"inference_zero_copy_ingress\":"
                       << metrics.inference_zero_copy_ingress.load()
                       << ",\"inference_copy_fallback\":"
@@ -357,6 +381,8 @@ int main(int argc, char **argv) {
                       << metrics.inference_preprocess_errors.load()
                       << ",\"inference_dma_sync_errors\":"
                       << metrics.inference_dma_sync_errors.load()
+                      << ",\"inference_backend_errors\":"
+                      << metrics.inference_backend_errors.load()
                       << ",\"inference_i420_rejections\":{\"invalid_dimensions\":"
                       << metrics.inference_i420_invalid_dimensions.load()
                       << ",\"unexpected_plane_count\":"
@@ -413,13 +439,13 @@ int main(int argc, char **argv) {
             last_report = now;
         }
 
-        std::cout << "[app] graceful shutdown requested\n";
+        eggvision::synchronizedLog(std::cout) << "[app] graceful shutdown requested\n";
         camera.stop();          // Stop producing before releasing downstream buffers.
         inference.stop();
         encoder.stop();
         event_recorder.stop();
         rtsp.stop();
-        std::cout << "[app] stopped captured=" << metrics.captured.load()
+        eggvision::synchronizedLog(std::cout) << "[app] stopped captured=" << metrics.captured.load()
                   << " rtsp=" << metrics.rtsp_pushed.load()
                   << " inferred=" << metrics.inference_processed.load()
                   << " encoded=" << metrics.encoder_access_units.load()
@@ -431,6 +457,8 @@ int main(int argc, char **argv) {
                   << metrics.inference_preprocess_errors.load()
                   << " inference_dma_sync_errors="
                   << metrics.inference_dma_sync_errors.load()
+                  << " inference_backend_errors="
+                  << metrics.inference_backend_errors.load()
                   << " capture_errors=" << metrics.capture_errors.load()
                   << " encoder_errors=" << metrics.encoder_errors.load()
                   << " encoder_recoveries=" << metrics.encoder_recoveries.load()
@@ -452,7 +480,7 @@ int main(int argc, char **argv) {
         }
         return metrics.outstanding_leases.load() == 0 ? 0 : 4;
     } catch (const std::exception &error) {
-        std::cerr << "[fatal] " << error.what() << '\n';
+        eggvision::synchronizedLog(std::cerr) << "[fatal] " << error.what() << '\n';
         usage(argv[0]);
         return 1;
     }

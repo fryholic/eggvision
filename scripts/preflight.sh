@@ -2,8 +2,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+mnn_root="${MNN_ROOT:-/usr/local/eggvision/mnn-3.6.1}"
 
-required_commands=(rpicam-hello gst-launch-1.0 gst-inspect-1.0 gst-discoverer-1.0 v4l2-ctl cmake pkg-config)
+required_commands=(rpicam-hello gst-launch-1.0 gst-inspect-1.0 gst-discoverer-1.0 v4l2-ctl ar cmake od pkg-config)
 for command in "${required_commands[@]}"; do
   command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }
 done
@@ -26,8 +27,24 @@ test -f /usr/local/lib/cmake/opencv4/OpenCVConfig.cmake || {
   echo "OpenCVConfig.cmake not found" >&2
   exit 1
 }
+test -f "${mnn_root}/include/MNN/Interpreter.hpp" &&
+  test -f "${mnn_root}/lib/libMNN.a" || {
+  echo "MNN 3.6.1 runtime not found under ${mnn_root}" >&2
+  exit 1
+}
+mnn_archive="${mnn_root}/lib/libMNN.a"
+mnn_archive_magic="$(od -An -tx1 -N8 "${mnn_archive}" | tr -d '[:space:]')"
+if [[ "${mnn_archive_magic}" != "213c617263683e0a" ]] ||
+  ! ar -t "${mnn_archive}" >/dev/null 2>&1; then
+  echo "MNN runtime is not a regular static archive: ${mnn_archive}" >&2
+  exit 1
+fi
 test -f models/yolov5n.xml && test -f models/yolov5n.bin || {
   echo "models/yolov5n.xml and .bin are required" >&2
+  exit 1
+}
+test -f models/yolov5n.mnn || {
+  echo "models/yolov5n.mnn is required" >&2
   exit 1
 }
 

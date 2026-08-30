@@ -1,4 +1,5 @@
 #include "eggvision/event_recorder.hpp"
+#include "eggvision/logging.hpp"
 
 #include "eggvision/config.hpp"
 #include "eggvision/encoded_ring_buffer.hpp"
@@ -516,7 +517,7 @@ struct EventRecorder::Impl {
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
         if (!initializing && std::getenv("EGGVISION_EVENT_TEST_REJECT_STORAGE")) {
             metrics.event_disk_space_rejections.fetch_add(1);
-            std::cerr << "{\"type\":\"event_storage_rejected\","
+            synchronizedLog(std::cerr) << "{\"type\":\"event_storage_rejected\","
                          "\"error\":\"injected runtime storage rejection\"}\n";
             return false;
         }
@@ -525,7 +526,7 @@ struct EventRecorder::Impl {
         const fs::space_info space = fs::space(root, error);
         if (error || space.available < config.event_min_free_bytes) {
             metrics.event_disk_space_rejections.fetch_add(1);
-            std::cerr << "{\"type\":\"event_storage_rejected\",\"available_bytes\":"
+            synchronizedLog(std::cerr) << "{\"type\":\"event_storage_rejected\",\"available_bytes\":"
                       << (error ? 0 : space.available)
                       << ",\"minimum_bytes\":" << config.event_min_free_bytes
                       << ",\"error\":\"" << jsonEscape(error.message()) << "\"}\n";
@@ -557,7 +558,7 @@ struct EventRecorder::Impl {
         gate.complete(cooldown_base);
         if (jobs.size() >= kWorkerQueueCapacity) {
             metrics.events_failed.fetch_add(1);
-            std::cerr << "{\"type\":\"event_failed\",\"event_id\":\""
+            synchronizedLog(std::cerr) << "{\"type\":\"event_failed\",\"event_id\":\""
                       << active->id << "\",\"error\":\"event worker queue is full\"}\n";
             active.reset();
             return;
@@ -592,13 +593,13 @@ struct EventRecorder::Impl {
         if (error || fs::exists(partial_dir) || fs::exists(final_dir) ||
             !fs::create_directory(partial_dir, error)) {
             metrics.events_failed.fetch_add(1);
-            std::cerr << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
+            synchronizedLog(std::cerr) << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
                       << "\",\"error\":\"event directory creation failed: "
                       << jsonEscape(error.message()) << "\"}\n";
             return;
         }
 
-        std::cout << "{\"type\":\"event_mux_started\",\"event_id\":\"" << job.id
+        synchronizedLog(std::cout) << "{\"type\":\"event_mux_started\",\"event_id\":\"" << job.id
                   << "\",\"access_units\":" << job.units.size() << "}\n";
         ArtifactResult snapshot;
         const bool snapshot_ok = writeSnapshot(job.snapshot,
@@ -635,14 +636,14 @@ struct EventRecorder::Impl {
         const fs::path metadata_partial = partial_dir / "metadata.partial.json";
         if (!writeMetadata(job, config, snapshot, video, job.errors, metadata_partial)) {
             metrics.events_failed.fetch_add(1);
-            std::cerr << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
+            synchronizedLog(std::cerr) << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
                       << "\",\"error\":\"metadata write failed\"}\n";
             return;
         }
 
         if (fatal_mux_failure || (!snapshot_ok && !video_ok)) {
             metrics.events_failed.fetch_add(1);
-            std::cerr << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
+            synchronizedLog(std::cerr) << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
                       << "\",\"partial_dir\":\"" << jsonEscape(partial_dir.string())
                       << "\",\"error\":\"artifact finalize failed\"}\n";
             return;
@@ -654,13 +655,13 @@ struct EventRecorder::Impl {
         }
         if (error) {
             metrics.events_failed.fetch_add(1);
-            std::cerr << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
+            synchronizedLog(std::cerr) << "{\"type\":\"event_failed\",\"event_id\":\"" << job.id
                       << "\",\"error\":\"atomic publish failed: "
                       << jsonEscape(error.message()) << "\"}\n";
             return;
         }
         metrics.events_completed.fetch_add(1);
-        std::cout << "{\"type\":\"event_completed\",\"event_id\":\"" << job.id
+        synchronizedLog(std::cout) << "{\"type\":\"event_completed\",\"event_id\":\"" << job.id
                   << "\",\"video_bytes\":" << video.bytes
                   << ",\"snapshot_bytes\":" << snapshot.bytes
                   << ",\"pre_roll_complete\":"
@@ -689,7 +690,7 @@ bool EventRecorder::initialize() {
     std::error_code error;
     fs::create_directories(impl_->root, error);
     if (error) {
-        std::cerr << "[event] cannot create events directory: " << error.message() << '\n';
+        synchronizedLog(std::cerr) << "[event] cannot create events directory: " << error.message() << '\n';
         return false;
     }
     const fs::path probe =
@@ -698,13 +699,13 @@ bool EventRecorder::initialize() {
         std::ofstream output(probe, std::ios::binary | std::ios::trunc);
         output << "ok\n";
         if (!output.good()) {
-            std::cerr << "[event] events directory is not writable: " << impl_->root << '\n';
+            synchronizedLog(std::cerr) << "[event] events directory is not writable: " << impl_->root << '\n';
             return false;
         }
     }
     fs::remove(probe, error);
     if (!impl_->storageAvailable(true)) {
-        std::cerr << "[event] storage reserve check failed during initialization\n";
+        synchronizedLog(std::cerr) << "[event] storage reserve check failed during initialization\n";
         return false;
     }
     for (const auto &entry : fs::recursive_directory_iterator(impl_->root, error)) {
@@ -714,11 +715,11 @@ bool EventRecorder::initialize() {
         const std::string name = entry.path().filename().string();
         if (entry.is_directory() && name.size() > 9 && name.front() == '.' &&
             name.rfind(".partial") == name.size() - 8) {
-            std::cerr << "[event] stale partial directory retained: " << entry.path() << '\n';
+            synchronizedLog(std::cerr) << "[event] stale partial directory retained: " << entry.path() << '\n';
         }
     }
     impl_->initialized = true;
-    std::cout << "[event] initialized root=" << impl_->root
+    synchronizedLog(std::cout) << "[event] initialized root=" << impl_->root
               << " pre=" << impl_->config.event_pre_seconds
               << " post=" << impl_->config.event_post_seconds
               << " cooldown=" << impl_->config.event_cooldown_seconds << '\n';
@@ -741,7 +742,7 @@ bool EventRecorder::start() {
     } catch (const std::system_error &error) {
         impl_->running = false;
         impl_->accepting = false;
-        std::cerr << "[event] failed to start worker: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[event] failed to start worker: " << error.what() << '\n';
         return false;
     }
     return true;
@@ -763,7 +764,7 @@ bool EventRecorder::trigger(const std::shared_ptr<FrameLease> &frame,
         std::max(impl_->latest_sensor_timestamp_ns, trigger_timestamp);
     if (!impl_->accepting || !impl_->gate.tryBegin(trigger_timestamp)) {
         impl_->metrics.events_suppressed.fetch_add(1);
-        std::cout << "{\"type\":\"event_suppressed\",\"sequence\":"
+        synchronizedLog(std::cout) << "{\"type\":\"event_suppressed\",\"sequence\":"
                   << frame->sequence() << ",\"sensor_timestamp_ns\":"
                   << trigger_timestamp << "}\n";
         return false;
@@ -800,7 +801,7 @@ bool EventRecorder::trigger(const std::shared_ptr<FrameLease> &frame,
         impl_->metrics.events_partial_preroll.fetch_add(1);
     }
     impl_->metrics.events_triggered.fetch_add(1);
-    std::cout << "{\"type\":\"event_triggered\",\"event_id\":\"" << event.id
+    synchronizedLog(std::cout) << "{\"type\":\"event_triggered\",\"event_id\":\"" << event.id
               << "\",\"sequence\":" << event.trigger_sequence
               << ",\"sensor_timestamp_ns\":" << trigger_timestamp
               << ",\"generation\":" << event.generation
@@ -815,7 +816,7 @@ bool EventRecorder::trigger(const std::shared_ptr<FrameLease> &frame,
     } else if (impl_->active->post_roll_complete) {
         impl_->finishLocked(true);
     } else {
-        std::cout << "{\"type\":\"event_collecting\",\"event_id\":\""
+        synchronizedLog(std::cout) << "{\"type\":\"event_collecting\",\"event_id\":\""
                   << impl_->active->id << "\",\"requested_end_sensor_timestamp_ns\":"
                   << impl_->active->requested_end_sensor_timestamp_ns << "}\n";
     }

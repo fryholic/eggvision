@@ -2,6 +2,7 @@
 
 #include "eggvision/config.hpp"
 #include "eggvision/frame.hpp"
+#include "eggvision/inference_backend.hpp"
 #include "eggvision/latest_frame_queue.hpp"
 #include "eggvision/metrics.hpp"
 
@@ -13,8 +14,6 @@
 #include <vector>
 
 #include <opencv2/core.hpp>
-#include <openvino/openvino.hpp>
-
 namespace eggvision {
 
 struct LetterboxTransform {
@@ -43,6 +42,8 @@ float intersectionOverUnion(const cv::Rect2f &a, const cv::Rect2f &b);
 std::vector<Detection> nonMaximumSuppression(std::vector<Detection> detections,
                                              float iou_threshold);
 void bgrToNormalizedRgbChw(const cv::Mat &bgr, float *destination);
+std::string inferenceModelFingerprint(const std::string &backend,
+                                      const std::string &model_path);
 
 class InferenceWorker {
 public:
@@ -57,6 +58,7 @@ public:
 
     bool initialize();
     bool start();
+    const std::string &modelSha256() const noexcept;
     void setDetectionConsumer(DetectionConsumer consumer);
     void submit(std::shared_ptr<FrameLease> frame);
     void stop();
@@ -70,10 +72,8 @@ private:
 
     AppConfig config_;
     Metrics &metrics_;
-    ov::Core core_;
-    std::shared_ptr<ov::Model> model_;
-    ov::CompiledModel compiled_model_;
-    ov::InferRequest infer_request_;
+    std::unique_ptr<InferenceBackend> backend_;
+    std::string model_sha256_;
     DetectionConsumer detection_consumer_;
     LatestFrameQueue<std::shared_ptr<FrameLease>> latest_;
     std::thread worker_;

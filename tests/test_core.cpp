@@ -3,19 +3,24 @@
 #include "eggvision/i420.hpp"
 #include "eggvision/inference.hpp"
 #include "eggvision/latest_frame_queue.hpp"
+#include "eggvision/logging.hpp"
 
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <linux/dma-buf.h>
@@ -305,6 +310,65 @@ void testDmaBufReadSync() {
 }  // namespace
 
 int main() {
+    std::ostringstream concurrent_log;
+    std::vector<std::thread> log_writers;
+    constexpr int kLogThreads = 8;
+    constexpr int kLogLinesPerThread = 100;
+    for (int thread = 0; thread < kLogThreads; ++thread) {
+        log_writers.emplace_back([thread, &concurrent_log] {
+            for (int line = 0; line < kLogLinesPerThread; ++line) {
+                eggvision::synchronizedLog(concurrent_log)
+                    << "{\"thread\":" << thread << ",\"line\":" << line << "}\n";
+            }
+        });
+    }
+    for (auto &writer : log_writers) {
+        writer.join();
+    }
+    std::set<std::string> observed_log_lines;
+    std::istringstream concurrent_log_input(concurrent_log.str());
+    std::string concurrent_line;
+    bool log_lines_valid = true;
+    while (std::getline(concurrent_log_input, concurrent_line)) {
+        const std::size_t separator = concurrent_line.find(",\"line\":");
+        log_lines_valid = log_lines_valid && concurrent_line.rfind("{\"thread\":", 0) == 0 &&
+                          separator != std::string::npos && concurrent_line.back() == '}';
+        observed_log_lines.insert(concurrent_line);
+    }
+    expect(log_lines_valid, "synchronized logger preserves complete JSON lines");
+    expect(observed_log_lines.size() == kLogThreads * kLogLinesPerThread,
+           "synchronized logger preserves every concurrent line exactly once");
+
+    namespace fs = std::filesystem;
+    const fs::path fingerprint_dir =
+        fs::temp_directory_path() / "eggvision-model-fingerprint-test";
+    std::error_code fingerprint_error;
+    fs::remove_all(fingerprint_dir, fingerprint_error);
+    fs::create_directory(fingerprint_dir);
+    const fs::path mnn_model = fingerprint_dir / "model.mnn";
+    const fs::path openvino_xml = fingerprint_dir / "model.xml";
+    const fs::path openvino_bin = fingerprint_dir / "model.bin";
+    {
+        std::ofstream(mnn_model, std::ios::binary) << "mnn-model";
+        std::ofstream(openvino_xml, std::ios::binary) << "openvino-graph";
+        std::ofstream(openvino_bin, std::ios::binary) << "weights-a";
+    }
+    const std::string mnn_fingerprint =
+        eggvision::inferenceModelFingerprint("mnn", mnn_model.string());
+    const std::string openvino_fingerprint_a =
+        eggvision::inferenceModelFingerprint("openvino", openvino_xml.string());
+    std::ofstream(openvino_bin, std::ios::binary | std::ios::trunc) << "weights-b";
+    const std::string openvino_fingerprint_b =
+        eggvision::inferenceModelFingerprint("openvino", openvino_xml.string());
+    expect(mnn_fingerprint.size() == 64,
+           "MNN fingerprint is the single model SHA-256");
+    expect(openvino_fingerprint_a.find("xml:") == 0 &&
+               openvino_fingerprint_a.find(",bin:") != std::string::npos,
+           "OpenVINO fingerprint identifies graph and weights");
+    expect(openvino_fingerprint_a != openvino_fingerprint_b,
+           "OpenVINO fingerprint changes when only BIN weights change");
+    fs::remove_all(fingerprint_dir, fingerprint_error);
+
     testDmaBufReadSync();
     testCompactI420Inspection();
 

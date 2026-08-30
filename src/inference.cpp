@@ -1,4 +1,5 @@
 #include "eggvision/inference.hpp"
+#include "eggvision/logging.hpp"
 #include "eggvision/dma_buf_sync.hpp"
 #include "eggvision/i420.hpp"
 
@@ -6,13 +7,16 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
 
 #include <opencv2/imgproc.hpp>
+#include <glib.h>
 
 namespace eggvision {
 namespace {
@@ -63,7 +67,52 @@ void recordI420Rejection(Metrics &metrics, CompactI420Status status) {
     }
 }
 
+std::string sha256File(const std::string &path) {
+    struct ChecksumDeleter {
+        void operator()(GChecksum *checksum) const noexcept {
+            g_checksum_free(checksum);
+        }
+    };
+    std::unique_ptr<GChecksum, ChecksumDeleter> checksum(
+        g_checksum_new(G_CHECKSUM_SHA256));
+    if (!checksum) {
+        throw std::runtime_error("cannot create SHA-256 checksum");
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("cannot open model for SHA-256: " + path);
+    }
+    char buffer[64 * 1024];
+    while (input) {
+        input.read(buffer, sizeof(buffer));
+        const std::streamsize count = input.gcount();
+        if (count > 0) {
+            g_checksum_update(checksum.get(),
+                              reinterpret_cast<const guchar *>(buffer),
+                              static_cast<gsize>(count));
+        }
+    }
+    if (!input.eof()) {
+        throw std::runtime_error("cannot read model for SHA-256: " + path);
+    }
+    return g_checksum_get_string(checksum.get());
+}
+
 }  // namespace
+
+std::string inferenceModelFingerprint(const std::string &backend,
+                                      const std::string &model_path) {
+    const std::string model_hash = sha256File(model_path);
+    if (backend == "mnn") {
+        return model_hash;
+    }
+    if (backend == "openvino") {
+        std::filesystem::path weights_path(model_path);
+        weights_path.replace_extension(".bin");
+        return "xml:" + model_hash + ",bin:" + sha256File(weights_path.string());
+    }
+    throw std::invalid_argument("unsupported inference backend: " + backend);
+}
 
 LetterboxTransform calculateLetterbox(int source_width,
                                       int source_height,
@@ -157,34 +206,41 @@ bool InferenceWorker::initialize() {
     }
     try {
         if (!std::filesystem::exists(config_.model_path)) {
-            std::cerr << "[inference] model not found: " << config_.model_path << '\n';
+            synchronizedLog(std::cerr) << "[inference] model not found: " << config_.model_path << '\n';
             return false;
         }
-        model_ = core_.read_model(config_.model_path);
-        const auto input_shape = model_->input().get_shape();
-        const auto output_shape = model_->output().get_shape();
-        const ov::Shape expected_input{1, 3, config_.inference_height, config_.inference_width};
-        if (input_shape != expected_input || output_shape.size() != 3 || output_shape[0] != 1 ||
-            output_shape[2] < 6) {
-            std::cerr << "[inference] unexpected model shapes input=" << input_shape
-                      << " output=" << output_shape << '\n';
+        model_sha256_ =
+            inferenceModelFingerprint(config_.inference_backend, config_.model_path);
+        backend_ = createInferenceBackend(config_.inference_backend);
+        InferenceBackendConfig backend_config;
+        backend_config.model_path = config_.model_path;
+        backend_config.input_width = config_.inference_width;
+        backend_config.input_height = config_.inference_height;
+        backend_config.threads = config_.inference_threads;
+        std::string error;
+        if (!backend_->initialize(backend_config, error)) {
+            synchronizedLog(std::cerr) << "[inference] " << backend_->name()
+                      << " initialization failed: " << error << '\n';
+            metrics_.inference_backend_errors.fetch_add(1);
+            backend_.reset();
             return false;
         }
-        ov::AnyMap properties{
-            {ov::hint::performance_mode.name(), ov::hint::PerformanceMode::LATENCY},
-            {ov::inference_num_threads.name(), static_cast<int>(config_.inference_threads)},
-        };
-        compiled_model_ = core_.compile_model(model_, "CPU", properties);
-        infer_request_ = compiled_model_.create_infer_request();
         initialized_.store(true);
-        std::cout << "[inference] OpenVINO model=" << config_.model_path
-                  << " input=" << input_shape << " output=" << output_shape
+        synchronizedLog(std::cout) << "[inference] backend=" << backend_->name()
+                  << " model=" << config_.model_path
+                  << " model_sha256=" << model_sha256_
+                  << " input=[1,3," << config_.inference_height << ','
+                  << config_.inference_width << "] output=[1,6300,85]"
                   << " device=CPU threads=" << config_.inference_threads << '\n';
         return true;
     } catch (const std::exception &error) {
-        std::cerr << "[inference] initialization failed: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[inference] initialization failed: " << error.what() << '\n';
         return false;
     }
+}
+
+const std::string &InferenceWorker::modelSha256() const noexcept {
+    return model_sha256_;
 }
 
 bool InferenceWorker::start() {
@@ -192,7 +248,7 @@ bool InferenceWorker::start() {
         return false;
     }
     if (!config_.inference_enabled) {
-        std::cout << "[inference] disabled by configuration\n";
+        synchronizedLog(std::cout) << "[inference] disabled by configuration\n";
         return true;
     }
     if (running_.exchange(true)) {
@@ -235,21 +291,29 @@ std::vector<Detection> InferenceWorker::infer(const cv::Mat &bgr,
                                         transform.resized_width,
                                         transform.resized_height)));
 
-    ov::Tensor input = infer_request_.get_input_tensor();
-    float *tensor = input.data<float>();
-    bgrToNormalizedRgbChw(letterboxed, tensor);
+    MutableInferenceTensor input = backend_->inputTensor();
+    const std::size_t expected_input_size =
+        static_cast<std::size_t>(3) * config_.inference_width * config_.inference_height;
+    if (!input || input.size != expected_input_size) {
+        throw std::runtime_error("inference backend returned an invalid input tensor");
+    }
+    bgrToNormalizedRgbChw(letterboxed, input.data);
     const auto preprocess_end = Clock::now();
 
-    infer_request_.infer();
+    std::string inference_error;
+    if (!backend_->run(inference_error)) {
+        metrics_.inference_backend_errors.fetch_add(1);
+        throw std::runtime_error("inference backend failed: " + inference_error);
+    }
     const auto inference_end = Clock::now();
 
-    ov::Tensor output = infer_request_.get_output_tensor();
-    const auto shape = output.get_shape();
-    const float *data = output.data<float>();
-    const std::size_t fields = shape[2];
+    const InferenceTensor output = backend_->outputTensor();
+    if (!output || output.fields < 6) {
+        throw std::runtime_error("inference backend returned an invalid output tensor");
+    }
     std::vector<Detection> detections;
-    for (std::size_t i = 0; i < shape[1]; ++i) {
-        const float *row = data + i * fields;
+    for (std::size_t i = 0; i < output.rows; ++i) {
+        const float *row = output.data + i * output.fields;
         const float confidence = row[4] * row[5];  // COCO class 0: person.
         if (confidence < config_.confidence_threshold) {
             continue;
@@ -290,7 +354,7 @@ void InferenceWorker::workerLoop() {
             if (!read_sync) {
                 metrics_.inference_preprocess_errors.fetch_add(1);
                 metrics_.inference_dma_sync_errors.fetch_add(1);
-                std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                synchronizedLog(std::cerr) << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
                 continue;
             }
 
@@ -302,14 +366,14 @@ void InferenceWorker::workerLoop() {
                 metrics_.inference_copy_fallback.fetch_add(1);
                 recordI420Rejection(metrics_, compact.status);
                 if (!reported_rejection || *reported_rejection != compact.status) {
-                    std::cerr << "[inference] I420 copy fallback reason="
+                    synchronizedLog(std::cerr) << "[inference] I420 copy fallback reason="
                               << compactI420StatusName(compact.status) << '\n';
                     reported_rejection = compact.status;
                 }
                 std::string error;
                 if (!copyMappedI420(view, i420, error)) {
                     metrics_.inference_preprocess_errors.fetch_add(1);
-                    std::cerr << "[inference] I420 copy fallback failed: " << error << '\n';
+                    synchronizedLog(std::cerr) << "[inference] I420 copy fallback failed: " << error << '\n';
                     continue;
                 }
                 i420_data = i420.data();
@@ -324,14 +388,14 @@ void InferenceWorker::workerLoop() {
                 if (!read_sync.finish(sync_error)) {
                     metrics_.inference_preprocess_errors.fetch_add(1);
                     metrics_.inference_dma_sync_errors.fetch_add(1);
-                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    synchronizedLog(std::cerr) << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
                     continue;
                 }
             } else {
                 if (!read_sync.finish(sync_error)) {
                     metrics_.inference_preprocess_errors.fetch_add(1);
                     metrics_.inference_dma_sync_errors.fetch_add(1);
-                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    synchronizedLog(std::cerr) << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
                     continue;
                 }
                 cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
@@ -358,7 +422,7 @@ void InferenceWorker::workerLoop() {
                 detection_consumer_(frame, detections);
             }
             if (processed % 10 == 0 || !detections.empty()) {
-                std::cout << std::fixed << std::setprecision(2)
+                synchronizedLog(std::cout) << std::fixed << std::setprecision(2)
                           << "{\"type\":\"inference\",\"sequence\":" << frame->sequence()
                           << ",\"persons\":" << detections.size()
                           << ",\"input_ms\":" << input_ms
@@ -369,7 +433,7 @@ void InferenceWorker::workerLoop() {
                           << ",\"pipeline_ms\":" << pipeline_ms << "}\n";
             }
         } catch (const std::exception &error) {
-            std::cerr << "[inference] frame failed: " << error.what() << '\n';
+            synchronizedLog(std::cerr) << "[inference] frame failed: " << error.what() << '\n';
         }
     }
 }
@@ -382,7 +446,7 @@ void InferenceWorker::stop() {
     if (worker_.joinable()) {
         worker_.join();
     }
-    std::cout << "[inference] stopped\n";
+    synchronizedLog(std::cout) << "[inference] stopped\n";
 }
 
 }  // namespace eggvision
