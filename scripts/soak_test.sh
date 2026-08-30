@@ -7,6 +7,21 @@ log="${2:-soak-$(date +%Y%m%d-%H%M%S).log}"
 events_dir="${3:-/tmp/eggvision-soak-events-$(date +%Y%m%d-%H%M%S)}"
 resource_log="${log}.resources"
 app="${EGGVISION_APP:-./build/eggvision_app}"
+backend="${EGGVISION_BACKEND:-mnn}"
+case "$backend" in
+  mnn)
+    model="${EGGVISION_MODEL:-models/yolov5n.mnn}"
+    threads="${EGGVISION_THREADS:-3}"
+    ;;
+  openvino)
+    model="${EGGVISION_MODEL:-models/yolov5n.xml}"
+    threads="${EGGVISION_THREADS:-2}"
+    ;;
+  *)
+    echo "EGGVISION_BACKEND must be mnn or openvino" >&2
+    exit 2
+    ;;
+esac
 
 if [[ -e "$events_dir" ]]; then
   echo "soak event path already exists: $events_dir" >&2
@@ -19,7 +34,9 @@ fi
 
 export LD_LIBRARY_PATH="/usr/local/runtime/lib/aarch64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 started_epoch="$(date +%s)"
+before_throttled="$(vcgencmd get_throttled)"
 stdbuf -oL -eL "$app" --duration "$duration" \
+  --inference-backend "$backend" --model "$model" --inference-threads "$threads" \
   --events-dir "$events_dir" --event-min-free-bytes 1048576 >"$log" 2>&1 &
 app_pid=$!
 trap 'kill -TERM "$app_pid" 2>/dev/null || true' EXIT
@@ -37,7 +54,9 @@ grep -q '\[camera\] capture started' "$log" || { echo "application did not start
     timestamp="$(date --iso-8601=seconds)"
     rss_kb="$(awk '/VmRSS/{print $2}' /proc/$app_pid/status)"
     fd_count="$(find /proc/$app_pid/fd -mindepth 1 -maxdepth 1 | wc -l)"
-    echo "$timestamp rss_kb=$rss_kb fd_count=$fd_count"
+    temperature="$(vcgencmd measure_temp)"
+    throttled="$(vcgencmd get_throttled)"
+    echo "$timestamp rss_kb=$rss_kb fd_count=$fd_count $temperature $throttled"
     sleep 30
   done
 ) >"$resource_log" &
@@ -49,6 +68,7 @@ python3 ./scripts/rtsp_lifecycle_test.py \
 wait "$app_pid"
 wait "$monitor_pid" || true
 trap - EXIT
+after_throttled="$(vcgencmd get_throttled)"
 elapsed="$(( $(date +%s) - started_epoch ))"
 if (( elapsed + 5 < duration )); then
   echo "soak test ended early: elapsed=${elapsed}s requested=${duration}s" >&2
@@ -61,8 +81,31 @@ fi
   echo "kernel_errors_end"
 } >>"$log"
 
-grep -q '\[app\] stopped .*outstanding=0' "$log" || {
+final_line="$(grep '\[app\] stopped ' "$log" | tail -n 1)"
+grep -q 'outstanding=0' <<<"$final_line" || {
   echo "soak test ended without clean lease release" >&2
   exit 1
 }
-echo "soak test passed: $log (resources: $resource_log, events: $events_dir)"
+for field in inference_copy_fallback inference_preprocess_errors \
+  inference_dma_sync_errors inference_backend_errors capture_errors encoder_errors \
+  encoder_recovery_failures rtsp_errors rtsp_recovery_failures events_failed; do
+  grep -q "${field}=0" <<<"$final_line" || {
+    echo "soak test failed nonzero ${field}: ${final_line}" >&2
+    exit 1
+  }
+done
+inferred="$(sed -n 's/.* inferred=\([0-9][0-9]*\).*/\1/p' <<<"$final_line")"
+zero_copy="$(sed -n 's/.* inference_zero_copy=\([0-9][0-9]*\).*/\1/p' <<<"$final_line")"
+[[ -n "$inferred" && "$inferred" -gt 0 && "$zero_copy" = "$inferred" ]] || {
+  echo "soak test did not preserve 100% compact-I420 ingress: ${final_line}" >&2
+  exit 1
+}
+for throttled in "$before_throttled" "$after_throttled"; do
+  value="${throttled#throttled=0x}"
+  (( (16#$value & 0xF) == 0 )) || {
+    echo "current throttling detected: ${throttled}" >&2
+    exit 1
+  }
+done
+echo "soak test passed: backend=$backend model=$model log=$log " \
+  "(resources: $resource_log, events: $events_dir)"
