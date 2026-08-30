@@ -1736,6 +1736,10 @@ void RtspServer::stopLocked() {
         g_main_loop_unref(loop_);
         loop_ = nullptr;
     }
+    // requestSessionCleanupStop() snapshots the active count before client
+    // teardown. Publish the postcondition only after every server/client owner
+    // has been released so shutdown and the next start epoch observe reality.
+    metrics_.rtsp_sessions_current.store(0);
     synchronizedLog(std::cout) << "[rtsp] stopped\n";
 }
 

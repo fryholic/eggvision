@@ -145,7 +145,8 @@ grep -q 'outstanding=0' <<<"$final_line" || {
 }
 for field in inference_copy_fallback inference_preprocess_errors \
   inference_dma_sync_errors inference_backend_errors capture_errors encoder_errors \
-  encoder_recovery_failures rtsp_errors rtsp_recovery_failures events_failed; do
+  encoder_recovery_failures rtsp_errors rtsp_recovery_failures rtsp_sessions_current \
+  events_failed; do
   grep -q "${field}=0" <<<"$final_line" || {
     echo "soak test failed nonzero ${field}: ${final_line}" >&2
     exit 1
