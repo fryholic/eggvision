@@ -1,4 +1,5 @@
 #include "eggvision/rtsp_server.hpp"
+#include "eggvision/logging.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -182,14 +183,14 @@ GSource *RtspServer::createListenerSource() {
     GError *error = nullptr;
     GSource *source = gst_rtsp_server_create_source(server_, nullptr, &error);
     if (!source) {
-        std::cerr << "[rtsp] failed to bind " << config_.rtsp_address << ':'
+        synchronizedLog(std::cerr) << "[rtsp] failed to bind " << config_.rtsp_address << ':'
                   << config_.rtsp_port << ": "
                   << (error && error->message ? error->message : "unknown error") << '\n';
         g_clear_error(&error);
         return nullptr;
     }
     if (g_source_attach(source, nullptr) == 0) {
-        std::cerr << "[rtsp] failed to attach listener source\n";
+        synchronizedLog(std::cerr) << "[rtsp] failed to attach listener source\n";
         destroySource(source);
         return nullptr;
     }
@@ -269,7 +270,7 @@ bool RtspServer::installFactory() {
 bool RtspServer::start() {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
     if (running_.load()) {
-        std::cerr << "[rtsp] start rejected: server is already running\n";
+        synchronizedLog(std::cerr) << "[rtsp] start rejected: server is already running\n";
         return false;
     }
 
@@ -280,7 +281,7 @@ bool RtspServer::start() {
         callback_state_ = std::make_shared<CallbackState>();
     } catch (const std::bad_alloc &error) {
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] failed to allocate callback epoch: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[rtsp] failed to allocate callback epoch: " << error.what() << '\n';
         return false;
     }
     callback_state_->server = this;
@@ -320,7 +321,7 @@ bool RtspServer::start() {
     server_ = gst_rtsp_server_new();
     if (!loop_ || !server_) {
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] failed to allocate server main-loop state\n";
+        synchronizedLog(std::cerr) << "[rtsp] failed to allocate server main-loop state\n";
         stopLocked();
         return false;
     }
@@ -335,7 +336,7 @@ bool RtspServer::start() {
         static_cast<GConnectFlags>(0));
     mounts_ = gst_rtsp_server_get_mount_points(server_);
     if (!installFactory()) {
-        std::cerr << "[rtsp] failed to install media factory\n";
+        synchronizedLog(std::cerr) << "[rtsp] failed to install media factory\n";
         stopLocked();
         return false;
     }
@@ -344,7 +345,7 @@ bool RtspServer::start() {
     // recoverMedia() runs behind a C callback and must never need to create a
     // thread after it has published Running state or transferred GObject refs.
     if (!startRecoveryWorker()) {
-        std::cerr << "[rtsp] failed to start recovery teardown worker\n";
+        synchronizedLog(std::cerr) << "[rtsp] failed to start recovery teardown worker\n";
         stopLocked();
         return false;
     }
@@ -361,7 +362,7 @@ bool RtspServer::start() {
     }
 
     if (!startSessionCleanup()) {
-        std::cerr << "[rtsp] failed to start session cleanup owner\n";
+        synchronizedLog(std::cerr) << "[rtsp] failed to start session cleanup owner\n";
         stopLocked();
         return false;
     }
@@ -369,7 +370,7 @@ bool RtspServer::start() {
     GSource *watchdog = createWatchdogSource();
     if (!watchdog) {
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] failed to attach watchdog source\n";
+        synchronizedLog(std::cerr) << "[rtsp] failed to attach watchdog source\n";
         stopLocked();
         return false;
     }
@@ -398,11 +399,11 @@ bool RtspServer::start() {
         loop_thread_ = std::thread([this] { g_main_loop_run(loop_); });
     } catch (const std::system_error &error) {
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] failed to start owner thread: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[rtsp] failed to start owner thread: " << error.what() << '\n';
         stopLocked();
         return false;
     }
-    std::cout << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
+    synchronizedLog(std::cout) << "[rtsp] ready at rtsp://<device-ip>:" << config_.rtsp_port
               << config_.rtsp_mount << " (pre-encoded H264 High@L4)\n";
     return true;
 }
@@ -498,7 +499,7 @@ gboolean RtspServer::cleanupSessions(GstRTSPSessionPool *pool, gpointer user_dat
 #ifdef EGGVISION_ENABLE_TEST_HOOKS
     if (!state->test_delay_consumed && state->test_delay_ms != 0) {
         state->test_delay_consumed = true;
-        std::cerr << "[rtsp] test hook delaying session cleanup by "
+        synchronizedLog(std::cerr) << "[rtsp] test hook delaying session cleanup by "
                   << state->test_delay_ms << "ms\n";
         g_usleep(static_cast<gulong>(state->test_delay_ms) * 1000);
     }
@@ -508,7 +509,7 @@ gboolean RtspServer::cleanupSessions(GstRTSPSessionPool *pool, gpointer user_dat
     state->current.store(active);
     state->cleaned.fetch_add(removed);
     if (removed != 0) {
-        std::cerr << "[rtsp] session cleanup removed=" << removed
+        synchronizedLog(std::cerr) << "[rtsp] session cleanup removed=" << removed
                   << " active=" << active << " max=" << state->max_sessions << '\n';
     }
     return state->stopping.load(std::memory_order_acquire)
@@ -642,12 +643,12 @@ bool RtspServer::startSessionCleanup() {
             g_object_unref(state->pool);
         }
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] session cleanup thread creation failed: "
+        synchronizedLog(std::cerr) << "[rtsp] session cleanup thread creation failed: "
                   << error.what() << '\n';
         return false;
     }
     session_cleanup_state_ = state;
-    std::cout << "[rtsp] session pool cleanup ready max=" << state->max_sessions << '\n';
+    synchronizedLog(std::cout) << "[rtsp] session pool cleanup ready max=" << state->max_sessions << '\n';
     return true;
 }
 
@@ -669,12 +670,12 @@ bool RtspServer::startRecoveryWorker() {
     } catch (const std::system_error &error) {
         metrics_.rtsp_errors.fetch_add(1);
         metrics_.rtsp_recovery_failures.fetch_add(1);
-        std::cerr << "[rtsp] recovery thread creation failed: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[rtsp] recovery thread creation failed: " << error.what() << '\n';
         return false;
     } catch (const std::bad_alloc &error) {
         metrics_.rtsp_errors.fetch_add(1);
         metrics_.rtsp_recovery_failures.fetch_add(1);
-        std::cerr << "[rtsp] recovery worker allocation failed: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[rtsp] recovery worker allocation failed: " << error.what() << '\n';
         return false;
     }
 }
@@ -831,7 +832,7 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
     GstElement *element = gst_rtsp_media_get_element(media);
     if (!element) {
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] media pipeline has no root element\n";
+        synchronizedLog(std::cerr) << "[rtsp] media pipeline has no root element\n";
         return false;
     }
     GstElement *source = gst_bin_get_by_name_recurse_up(GST_BIN(element), "source");
@@ -841,7 +842,7 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
             gst_object_unref(source);
         }
         metrics_.rtsp_errors.fetch_add(1);
-        std::cerr << "[rtsp] media pipeline has no appsrc\n";
+        synchronizedLog(std::cerr) << "[rtsp] media pipeline has no appsrc\n";
         return false;
     }
 
@@ -893,7 +894,7 @@ bool RtspServer::bindMediaSource(GstRTSPMedia *media) {
     }
     if (changed) {
         latest_.clear();
-        std::cout << "[rtsp] media source bound generation=" << generation_.load() << '\n';
+        synchronizedLog(std::cout) << "[rtsp] media source bound generation=" << generation_.load() << '\n';
     }
     return accepted;
 }
@@ -942,7 +943,7 @@ void RtspServer::onMediaConfigure(GstRTSPMediaFactory *factory, GstRTSPMedia *me
     }
     if (!accepted) {
         disconnectMediaHandlers(media, handlers);
-        std::cout << "[rtsp] ignored concurrent media configuration\n";
+        synchronizedLog(std::cout) << "[rtsp] ignored concurrent media configuration\n";
         return;
     }
     disconnectMediaHandlers(previous_media, previous_handlers);
@@ -963,7 +964,7 @@ void RtspServer::onMediaConfigure(GstRTSPMediaFactory *factory, GstRTSPMedia *me
         }
         return;
     }
-    std::cout << "[rtsp] client media configured\n";
+    synchronizedLog(std::cout) << "[rtsp] client media configured\n";
 }
 
 void RtspServer::onMediaPrepared(GstRTSPMedia *media) {
@@ -979,7 +980,7 @@ void RtspServer::onMediaPrepared(GstRTSPMedia *media) {
             }
         }
         if (current) {
-            std::cout << "[rtsp] client media prepared\n";
+            synchronizedLog(std::cout) << "[rtsp] client media prepared\n";
         }
     }
 }
@@ -1023,7 +1024,7 @@ void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
         }
     }
     if (!retired_media) {
-        std::cout << "[rtsp] ignored stale media release\n";
+        synchronizedLog(std::cout) << "[rtsp] ignored stale media release\n";
         return;
     }
     latest_.clear();
@@ -1033,10 +1034,10 @@ void RtspServer::onMediaUnprepared(GstRTSPMedia *media) {
     }
     g_object_unref(retired_media);
     if (recovered_from_error) {
-        std::cerr << "[rtsp] recovery media unprepared; factory cache eviction confirmed: "
+        synchronizedLog(std::cerr) << "[rtsp] recovery media unprepared; factory cache eviction confirmed: "
                   << recovery_reason << '\n';
     } else {
-        std::cout << "[rtsp] client media released; factory cache cleared\n";
+        synchronizedLog(std::cout) << "[rtsp] client media released; factory cache cleared\n";
     }
 }
 
@@ -1049,14 +1050,14 @@ void RtspServer::onMediaTargetState(GstRTSPMedia *media, GstState state) {
         observed_status_ = GST_RTSP_MEDIA_STATUS_UNPREPARING;
         status_since_us_ = g_get_monotonic_time();
     }
-    std::cout << "[rtsp] media status=unpreparing\n";
+    synchronizedLog(std::cout) << "[rtsp] media status=unpreparing\n";
 }
 
 void RtspServer::onMediaNewState(GstRTSPMedia *media, GstState state) {
     if (state == GST_STATE_READY || state == GST_STATE_PAUSED || state == GST_STATE_PLAYING) {
         bindMediaSource(media);
     }
-    std::cout << "[rtsp] media state=" << gst_element_state_get_name(state) << '\n';
+    synchronizedLog(std::cout) << "[rtsp] media state=" << gst_element_state_get_name(state) << '\n';
 }
 
 gboolean RtspServer::onMediaHandleMessage(GstRTSPMedia *media, GstMessage *message) {
@@ -1089,12 +1090,13 @@ gboolean RtspServer::onMediaHandleMessage(GstRTSPMedia *media, GstMessage *messa
     gchar *debug = nullptr;
     gst_message_parse_error(message, &error, &debug);
     metrics_.rtsp_errors.fetch_add(1);
-    std::cerr << "[rtsp] media error: "
+    SynchronizedLogLine error_log(std::cerr);
+    error_log << "[rtsp] media error: "
               << (error && error->message ? error->message : "unknown error");
     if (debug && *debug) {
-        std::cerr << " (" << debug << ')';
+        error_log << " (" << debug << ')';
     }
-    std::cerr << '\n';
+    error_log << '\n';
     g_clear_error(&error);
     g_free(debug);
 
@@ -1143,7 +1145,7 @@ gboolean RtspServer::onWatchdog() {
             access(test_recovery_pause_path_.c_str(), F_OK) == 0) {
             if (!test_recovery_pause_reported_) {
                 test_recovery_pause_reported_ = true;
-                std::cerr << "[rtsp] test hook holding pending recovery before watchdog\n";
+                synchronizedLog(std::cerr) << "[rtsp] test hook holding pending recovery before watchdog\n";
             }
             return G_SOURCE_CONTINUE;
         }
@@ -1158,7 +1160,7 @@ gboolean RtspServer::onWatchdog() {
             }
         }
         if (delay_ms != 0) {
-            std::cerr << "[rtsp] test hook watchdog recovery entered; delaying "
+            synchronizedLog(std::cerr) << "[rtsp] test hook watchdog recovery entered; delaying "
                       << delay_ms << "ms\n";
             g_usleep(static_cast<gulong>(delay_ms) * 1000);
         }
@@ -1256,7 +1258,7 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
             if (actual_media_generation == expected_media_generation) {
                 return false;
             }
-            std::cout << "[rtsp] ignored stale recovery request generation="
+            synchronizedLog(std::cout) << "[rtsp] ignored stale recovery request generation="
                       << expected_media_generation << " current="
                       << actual_media_generation << '\n';
             return false;
@@ -1268,7 +1270,7 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
         latest_.clear();
         destroySource(listener_source);
         worker_state->cv.notify_one();
-        std::cerr << "[rtsp] recovery teardown started: "
+        synchronizedLog(std::cerr) << "[rtsp] recovery teardown started: "
                   << (reason ? reason : "media recovery requested") << '\n';
         return true;
     } catch (const std::exception &error) {
@@ -1298,12 +1300,12 @@ bool RtspServer::recoverMedia(std::uint64_t expected_media_generation,
             metrics_.rtsp_errors.fetch_add(1);
             metrics_.rtsp_recovery_failures.fetch_add(1);
         }
-        std::cerr << "[rtsp] recovery dispatch failed safely: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[rtsp] recovery dispatch failed safely: " << error.what() << '\n';
         return false;
     } catch (...) {
         metrics_.rtsp_errors.fetch_add(1);
         metrics_.rtsp_recovery_failures.fetch_add(1);
-        std::cerr << "[rtsp] recovery dispatch failed safely: unknown exception\n";
+        synchronizedLog(std::cerr) << "[rtsp] recovery dispatch failed safely: unknown exception\n";
         return false;
     }
 }
@@ -1336,7 +1338,7 @@ void RtspServer::finishRecoveryIfReady() {
     if (report_timeout) {
         metrics_.rtsp_errors.fetch_add(1);
         metrics_.rtsp_recovery_failures.fetch_add(1);
-        std::cerr << "[rtsp] recovery failed: media did not reach UNPREPARED within 5 seconds"
+        synchronizedLog(std::cerr) << "[rtsp] recovery failed: media did not reach UNPREPARED within 5 seconds"
                   << " generation=" << generation << '\n';
     }
     if (!ready) {
@@ -1378,12 +1380,12 @@ void RtspServer::finishRecoveryIfReady() {
     }
     if (resumed) {
         metrics_.rtsp_recoveries.fetch_add(1);
-        std::cerr << "[rtsp] recovery completed; media cache cleared and listener resumed: "
+        synchronizedLog(std::cerr) << "[rtsp] recovery completed; media cache cleared and listener resumed: "
                   << reason << '\n';
     } else if (report_attach_failure) {
         metrics_.rtsp_errors.fetch_add(1);
         metrics_.rtsp_recovery_failures.fetch_add(1);
-        std::cerr << "[rtsp] recovery failed: listener did not resume\n";
+        synchronizedLog(std::cerr) << "[rtsp] recovery failed: listener did not resume\n";
     }
 }
 
@@ -1465,7 +1467,7 @@ void RtspServer::feederLoop() {
             if (independently_decodable && force_initial_keyframe_drop) {
                 force_initial_keyframe_drop = false;
                 independently_decodable = false;
-                std::cout << "[rtsp] test hook discarding initial keyframe\n";
+                synchronizedLog(std::cout) << "[rtsp] test hook discarding initial keyframe\n";
             }
 #endif
             if (!independently_decodable) {
@@ -1485,7 +1487,7 @@ void RtspServer::feederLoop() {
             access(test_push_error_trigger_.c_str(), F_OK) == 0) {
             test_push_error_consumed_ = true;
             test_push_errors_remaining_ = 3;
-            std::cerr << "[rtsp] test hook injecting three appsrc push errors\n";
+            synchronizedLog(std::cerr) << "[rtsp] test hook injecting three appsrc push errors\n";
         }
         GstFlowReturn flow = GST_FLOW_OK;
         if (test_push_errors_remaining_ > 0) {
@@ -1519,14 +1521,14 @@ void RtspServer::feederLoop() {
                         recovery_generation_ = media_generation;
                         recovery_reason_ = "repeated appsrc push failure";
                         if (consecutive_push_failures_ == 3) {
-                            std::cerr << "[rtsp] recovery request pending token="
+                            synchronizedLog(std::cerr) << "[rtsp] recovery request pending token="
                                       << recovery_token_ << " generation="
                                       << recovery_generation_ << '\n';
                         }
                     }
                 }
             }
-            std::cerr << "[rtsp] appsrc push failed: " << gst_flow_get_name(flow) << '\n';
+            synchronizedLog(std::cerr) << "[rtsp] appsrc push failed: " << gst_flow_get_name(flow) << '\n';
         } else {
             std::lock_guard<std::mutex> lock(source_mutex_);
             if (current_media_ && media_generation_ == media_generation) {
@@ -1580,7 +1582,7 @@ void RtspServer::stopLocked() {
             !recovery_job_->done.load(std::memory_order_acquire)) {
             recovery_job = recovery_job_;
         } else if (recovery_state_ == RecoveryState::Requested) {
-            std::cerr << "[rtsp] pending recovery cancelled by stop token="
+            synchronizedLog(std::cerr) << "[rtsp] pending recovery cancelled by stop token="
                       << recovery_token_ << '\n';
         }
     }
@@ -1619,7 +1621,7 @@ void RtspServer::stopLocked() {
             do {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - wait_started);
-                std::cerr << "[rtsp] shutdown delayed: recovery teardown token="
+                synchronizedLog(std::cerr) << "[rtsp] shutdown delayed: recovery teardown token="
                           << recovery_job->token << " still running after "
                           << elapsed.count()
                           << " seconds; retaining owners and waiting safely\n";
@@ -1632,7 +1634,7 @@ void RtspServer::stopLocked() {
             } while (!completed);
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - wait_started);
-            std::cerr << "[rtsp] delayed recovery teardown completed token="
+            synchronizedLog(std::cerr) << "[rtsp] delayed recovery teardown completed token="
                       << recovery_job->token << " elapsed_ms=" << elapsed.count()
                       << "; shutdown continuing\n";
         }
@@ -1734,7 +1736,7 @@ void RtspServer::stopLocked() {
         g_main_loop_unref(loop_);
         loop_ = nullptr;
     }
-    std::cout << "[rtsp] stopped\n";
+    synchronizedLog(std::cout) << "[rtsp] stopped\n";
 }
 
 std::string RtspServer::url(const std::string &host) const {

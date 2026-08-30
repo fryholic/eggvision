@@ -56,6 +56,7 @@ add_library(eggvision_core
     src/i420.cpp
     src/inference.cpp
     src/inference_backend.cpp
+    src/logging.cpp
     src/mnn_backend.cpp
     src/openvino_backend.cpp
     src/rtsp_server.cpp

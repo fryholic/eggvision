@@ -1,4 +1,5 @@
 #include "eggvision/inference.hpp"
+#include "eggvision/logging.hpp"
 #include "eggvision/dma_buf_sync.hpp"
 #include "eggvision/i420.hpp"
 
@@ -205,7 +206,7 @@ bool InferenceWorker::initialize() {
     }
     try {
         if (!std::filesystem::exists(config_.model_path)) {
-            std::cerr << "[inference] model not found: " << config_.model_path << '\n';
+            synchronizedLog(std::cerr) << "[inference] model not found: " << config_.model_path << '\n';
             return false;
         }
         model_sha256_ =
@@ -218,14 +219,14 @@ bool InferenceWorker::initialize() {
         backend_config.threads = config_.inference_threads;
         std::string error;
         if (!backend_->initialize(backend_config, error)) {
-            std::cerr << "[inference] " << backend_->name()
+            synchronizedLog(std::cerr) << "[inference] " << backend_->name()
                       << " initialization failed: " << error << '\n';
             metrics_.inference_backend_errors.fetch_add(1);
             backend_.reset();
             return false;
         }
         initialized_.store(true);
-        std::cout << "[inference] backend=" << backend_->name()
+        synchronizedLog(std::cout) << "[inference] backend=" << backend_->name()
                   << " model=" << config_.model_path
                   << " model_sha256=" << model_sha256_
                   << " input=[1,3," << config_.inference_height << ','
@@ -233,7 +234,7 @@ bool InferenceWorker::initialize() {
                   << " device=CPU threads=" << config_.inference_threads << '\n';
         return true;
     } catch (const std::exception &error) {
-        std::cerr << "[inference] initialization failed: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[inference] initialization failed: " << error.what() << '\n';
         return false;
     }
 }
@@ -247,7 +248,7 @@ bool InferenceWorker::start() {
         return false;
     }
     if (!config_.inference_enabled) {
-        std::cout << "[inference] disabled by configuration\n";
+        synchronizedLog(std::cout) << "[inference] disabled by configuration\n";
         return true;
     }
     if (running_.exchange(true)) {
@@ -353,7 +354,7 @@ void InferenceWorker::workerLoop() {
             if (!read_sync) {
                 metrics_.inference_preprocess_errors.fetch_add(1);
                 metrics_.inference_dma_sync_errors.fetch_add(1);
-                std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                synchronizedLog(std::cerr) << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
                 continue;
             }
 
@@ -365,14 +366,14 @@ void InferenceWorker::workerLoop() {
                 metrics_.inference_copy_fallback.fetch_add(1);
                 recordI420Rejection(metrics_, compact.status);
                 if (!reported_rejection || *reported_rejection != compact.status) {
-                    std::cerr << "[inference] I420 copy fallback reason="
+                    synchronizedLog(std::cerr) << "[inference] I420 copy fallback reason="
                               << compactI420StatusName(compact.status) << '\n';
                     reported_rejection = compact.status;
                 }
                 std::string error;
                 if (!copyMappedI420(view, i420, error)) {
                     metrics_.inference_preprocess_errors.fetch_add(1);
-                    std::cerr << "[inference] I420 copy fallback failed: " << error << '\n';
+                    synchronizedLog(std::cerr) << "[inference] I420 copy fallback failed: " << error << '\n';
                     continue;
                 }
                 i420_data = i420.data();
@@ -387,14 +388,14 @@ void InferenceWorker::workerLoop() {
                 if (!read_sync.finish(sync_error)) {
                     metrics_.inference_preprocess_errors.fetch_add(1);
                     metrics_.inference_dma_sync_errors.fetch_add(1);
-                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    synchronizedLog(std::cerr) << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
                     continue;
                 }
             } else {
                 if (!read_sync.finish(sync_error)) {
                     metrics_.inference_preprocess_errors.fetch_add(1);
                     metrics_.inference_dma_sync_errors.fetch_add(1);
-                    std::cerr << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
+                    synchronizedLog(std::cerr) << "[inference] DMA-BUF read sync failed: " << sync_error << '\n';
                     continue;
                 }
                 cv::Mat yuv(static_cast<int>(view.height * 3 / 2),
@@ -421,7 +422,7 @@ void InferenceWorker::workerLoop() {
                 detection_consumer_(frame, detections);
             }
             if (processed % 10 == 0 || !detections.empty()) {
-                std::cout << std::fixed << std::setprecision(2)
+                synchronizedLog(std::cout) << std::fixed << std::setprecision(2)
                           << "{\"type\":\"inference\",\"sequence\":" << frame->sequence()
                           << ",\"persons\":" << detections.size()
                           << ",\"input_ms\":" << input_ms
@@ -432,7 +433,7 @@ void InferenceWorker::workerLoop() {
                           << ",\"pipeline_ms\":" << pipeline_ms << "}\n";
             }
         } catch (const std::exception &error) {
-            std::cerr << "[inference] frame failed: " << error.what() << '\n';
+            synchronizedLog(std::cerr) << "[inference] frame failed: " << error.what() << '\n';
         }
     }
 }
@@ -445,7 +446,7 @@ void InferenceWorker::stop() {
     if (worker_.joinable()) {
         worker_.join();
     }
-    std::cout << "[inference] stopped\n";
+    synchronizedLog(std::cout) << "[inference] stopped\n";
 }
 
 }  // namespace eggvision

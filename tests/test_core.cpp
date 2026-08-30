@@ -3,6 +3,7 @@
 #include "eggvision/i420.hpp"
 #include "eggvision/inference.hpp"
 #include "eggvision/latest_frame_queue.hpp"
+#include "eggvision/logging.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -15,9 +16,11 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <linux/dma-buf.h>
@@ -307,6 +310,35 @@ void testDmaBufReadSync() {
 }  // namespace
 
 int main() {
+    std::ostringstream concurrent_log;
+    std::vector<std::thread> log_writers;
+    constexpr int kLogThreads = 8;
+    constexpr int kLogLinesPerThread = 100;
+    for (int thread = 0; thread < kLogThreads; ++thread) {
+        log_writers.emplace_back([thread, &concurrent_log] {
+            for (int line = 0; line < kLogLinesPerThread; ++line) {
+                eggvision::synchronizedLog(concurrent_log)
+                    << "{\"thread\":" << thread << ",\"line\":" << line << "}\n";
+            }
+        });
+    }
+    for (auto &writer : log_writers) {
+        writer.join();
+    }
+    std::set<std::string> observed_log_lines;
+    std::istringstream concurrent_log_input(concurrent_log.str());
+    std::string concurrent_line;
+    bool log_lines_valid = true;
+    while (std::getline(concurrent_log_input, concurrent_line)) {
+        const std::size_t separator = concurrent_line.find(",\"line\":");
+        log_lines_valid = log_lines_valid && concurrent_line.rfind("{\"thread\":", 0) == 0 &&
+                          separator != std::string::npos && concurrent_line.back() == '}';
+        observed_log_lines.insert(concurrent_line);
+    }
+    expect(log_lines_valid, "synchronized logger preserves complete JSON lines");
+    expect(observed_log_lines.size() == kLogThreads * kLogLinesPerThread,
+           "synchronized logger preserves every concurrent line exactly once");
+
     namespace fs = std::filesystem;
     const fs::path fingerprint_dir =
         fs::temp_directory_path() / "eggvision-model-fingerprint-test";

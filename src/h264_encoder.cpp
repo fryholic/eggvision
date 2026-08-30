@@ -1,4 +1,5 @@
 #include "eggvision/h264_encoder.hpp"
+#include "eggvision/logging.hpp"
 
 #include "eggvision/h264_bitstream.hpp"
 
@@ -68,14 +69,14 @@ bool H264Encoder::initialize() {
     GError *error = nullptr;
     pipeline_ = gst_parse_launch(launch.str().c_str(), &error);
     if (!pipeline_) {
-        std::cerr << "[encoder] pipeline creation failed: "
+        synchronizedLog(std::cerr) << "[encoder] pipeline creation failed: "
                   << (error && error->message ? error->message : "unknown error") << '\n';
         g_clear_error(&error);
         metrics_.encoder_errors.fetch_add(1);
         return false;
     }
     if (error) {
-        std::cerr << "[encoder] pipeline parse warning: " << error->message << '\n';
+        synchronizedLog(std::cerr) << "[encoder] pipeline parse warning: " << error->message << '\n';
         g_clear_error(&error);
     }
 
@@ -88,7 +89,7 @@ bool H264Encoder::initialize() {
         if (sink) {
             gst_object_unref(sink);
         }
-        std::cerr << "[encoder] pipeline is missing appsrc or appsink\n";
+        synchronizedLog(std::cerr) << "[encoder] pipeline is missing appsrc or appsink\n";
         metrics_.encoder_errors.fetch_add(1);
         releasePipeline();
         return false;
@@ -100,7 +101,7 @@ bool H264Encoder::initialize() {
     gst_app_sink_set_drop(appsink_, TRUE);
     gst_app_sink_set_max_buffers(appsink_, 8);
     initialized_.store(true);
-    std::cout << "[encoder] initialized H264 High@L4 " << config_.main_width << 'x'
+    synchronizedLog(std::cout) << "[encoder] initialized H264 High@L4 " << config_.main_width << 'x'
               << config_.main_height << '@' << config_.fps << " bitrate=" << config_.bitrate
               << " gop=" << config_.gop << '\n';
     return true;
@@ -124,7 +125,7 @@ bool H264Encoder::start() {
         independent_frame_seen_ = false;
     }
     if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-        std::cerr << "[encoder] failed to enter PLAYING state\n";
+        synchronizedLog(std::cerr) << "[encoder] failed to enter PLAYING state\n";
         metrics_.encoder_errors.fetch_add(1);
         running_.store(false);
         return false;
@@ -135,7 +136,7 @@ bool H264Encoder::start() {
         output_thread_ = std::thread(&H264Encoder::outputLoop, this);
         bus_thread_ = std::thread(&H264Encoder::busLoop, this);
     } catch (const std::system_error &error) {
-        std::cerr << "[encoder] failed to start worker: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[encoder] failed to start worker: " << error.what() << '\n';
         metrics_.encoder_errors.fetch_add(1);
         running_.store(false);
         latest_.close();
@@ -151,7 +152,7 @@ bool H264Encoder::start() {
         gst_element_set_state(pipeline_, GST_STATE_NULL);
         return false;
     }
-    std::cout << "[encoder] started generation=" << generation_.load() << '\n';
+    synchronizedLog(std::cout) << "[encoder] started generation=" << generation_.load() << '\n';
     return true;
 }
 
@@ -308,7 +309,7 @@ void H264Encoder::inputLoop() {
         const GstFlowReturn flow = gst_app_src_push_buffer(appsrc_, buffer);
         if (flow != GST_FLOW_OK && flow != GST_FLOW_FLUSHING) {
             metrics_.encoder_errors.fetch_add(1);
-            std::cerr << "[encoder] appsrc push failed: " << gst_flow_get_name(flow) << '\n';
+            synchronizedLog(std::cerr) << "[encoder] appsrc push failed: " << gst_flow_get_name(flow) << '\n';
         }
     }
 }
@@ -367,7 +368,7 @@ void H264Encoder::outputLoop() {
                 consumer(std::move(unit));
             } catch (const std::exception &error) {
                 metrics_.encoder_errors.fetch_add(1);
-                std::cerr << "[encoder] consumer failed: " << error.what() << '\n';
+                synchronizedLog(std::cerr) << "[encoder] consumer failed: " << error.what() << '\n';
             }
         }
 
@@ -405,12 +406,12 @@ void H264Encoder::busLoop() {
                 GError *error = nullptr;
                 gchar *debug = nullptr;
                 gst_message_parse_error(message, &error, &debug);
-                std::cerr << "[encoder] pipeline error; recovery requested: "
+                synchronizedLog(std::cerr) << "[encoder] pipeline error; recovery requested: "
                           << (error && error->message ? error->message : "unknown") << '\n';
                 g_clear_error(&error);
                 g_free(debug);
             } else {
-                std::cerr << "[encoder] unexpected EOS; recovery requested\n";
+                synchronizedLog(std::cerr) << "[encoder] unexpected EOS; recovery requested\n";
             }
             metrics_.encoder_errors.fetch_add(1);
             recovery_requested_.store(true);
@@ -445,7 +446,7 @@ void H264Encoder::stop() {
     }
     releasePipeline();
     if (was_running) {
-        std::cout << "[encoder] stopped\n";
+        synchronizedLog(std::cout) << "[encoder] stopped\n";
     }
 }
 

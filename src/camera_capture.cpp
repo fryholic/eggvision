@@ -1,4 +1,5 @@
 #include "eggvision/camera_capture.hpp"
+#include "eggvision/logging.hpp"
 
 #include <algorithm>
 #include <array>
@@ -52,17 +53,17 @@ bool CameraCapture::initialize() {
 
     manager_ = std::make_unique<libcamera::CameraManager>();
     if (manager_->start() != 0) {
-        std::cerr << "[camera] CameraManager start failed\n";
+        synchronizedLog(std::cerr) << "[camera] CameraManager start failed\n";
         return false;
     }
     if (manager_->cameras().empty()) {
-        std::cerr << "[camera] no camera detected\n";
+        synchronizedLog(std::cerr) << "[camera] no camera detected\n";
         return false;
     }
 
     camera_ = manager_->cameras().front();
     if (camera_->acquire() != 0) {
-        std::cerr << "[camera] acquire failed: " << camera_->id() << '\n';
+        synchronizedLog(std::cerr) << "[camera] acquire failed: " << camera_->id() << '\n';
         return false;
     }
 
@@ -71,7 +72,7 @@ bool CameraCapture::initialize() {
     }
 
     initialized_.store(true);
-    std::cout << "[camera] ready id=" << camera_->id()
+    synchronizedLog(std::cout) << "[camera] ready id=" << camera_->id()
               << " main=" << main_layout_.width << 'x' << main_layout_.height
               << " stride=" << main_layout_.stride
               << " lores=" << lores_layout_.width << 'x' << lores_layout_.height
@@ -79,7 +80,7 @@ bool CameraCapture::initialize() {
               << " paired_requests=" << requests_.size() << '\n';
     for (std::size_t i = 0; i < main_layout_.planes.size(); ++i) {
         const auto &plane = main_layout_.planes[i];
-        std::cout << "[camera] main_plane=" << i << " fd=" << plane.fd
+        synchronizedLog(std::cout) << "[camera] main_plane=" << i << " fd=" << plane.fd
                   << " offset=" << plane.offset << " length=" << plane.length << '\n';
     }
     return true;
@@ -89,7 +90,7 @@ bool CameraCapture::configureStreams() {
     camera_config_ = camera_->generateConfiguration(
         {libcamera::StreamRole::VideoRecording, libcamera::StreamRole::Viewfinder});
     if (!camera_config_ || camera_config_->size() != 2) {
-        std::cerr << "[camera] camera cannot create two output streams\n";
+        synchronizedLog(std::cerr) << "[camera] camera cannot create two output streams\n";
         return false;
     }
 
@@ -105,7 +106,7 @@ bool CameraCapture::configureStreams() {
 
     const auto status = camera_config_->validate();
     if (status == libcamera::CameraConfiguration::Invalid) {
-        std::cerr << "[camera] dual-stream configuration is invalid\n";
+        synchronizedLog(std::cerr) << "[camera] dual-stream configuration is invalid\n";
         return false;
     }
 
@@ -114,17 +115,17 @@ bool CameraCapture::configureStreams() {
                        main.size == libcamera::Size(config_values_.main_width, config_values_.main_height) &&
                        lores.size == libcamera::Size(config_values_.lores_width, config_values_.lores_height);
     if (!exact) {
-        std::cerr << "[camera] validation adjusted outside accepted layout: main="
+        synchronizedLog(std::cerr) << "[camera] validation adjusted outside accepted layout: main="
                   << main.toString() << " lores=" << lores.toString() << '\n';
         return false;
     }
     if (status == libcamera::CameraConfiguration::Adjusted) {
-        std::cout << "[camera] configuration adjusted within accepted layout: main="
+        synchronizedLog(std::cout) << "[camera] configuration adjusted within accepted layout: main="
                   << main.toString() << " lores=" << lores.toString() << '\n';
     }
 
     if (camera_->configure(camera_config_.get()) != 0) {
-        std::cerr << "[camera] configure failed\n";
+        synchronizedLog(std::cerr) << "[camera] configure failed\n";
         return false;
     }
 
@@ -144,7 +145,7 @@ bool CameraCapture::configureStreams() {
 bool CameraCapture::allocateBuffers() {
     allocator_ = std::make_unique<libcamera::FrameBufferAllocator>(camera_);
     if (allocator_->allocate(main_stream_) < 0 || allocator_->allocate(lores_stream_) < 0) {
-        std::cerr << "[camera] buffer allocation failed\n";
+        synchronizedLog(std::cerr) << "[camera] buffer allocation failed\n";
         return false;
     }
 
@@ -175,7 +176,7 @@ bool CameraCapture::mapBuffers(libcamera::Stream *stream,
         for (const auto &plane : buffer->planes()) {
             const int fd = plane.fd.get();
             if (fd < 0 || plane.length > std::numeric_limits<std::size_t>::max() - plane.offset) {
-                std::cerr << "[camera] " << name << " invalid DMA-BUF plane span\n";
+                synchronizedLog(std::cerr) << "[camera] " << name << " invalid DMA-BUF plane span\n";
                 return false;
             }
             const std::size_t map_length = static_cast<std::size_t>(plane.offset) + plane.length;
@@ -197,7 +198,7 @@ bool CameraCapture::mapBuffers(libcamera::Stream *stream,
                                 mapping.fd,
                                 0);
             if (mapping.base == MAP_FAILED) {
-                std::cerr << "[camera] " << name << " mmap failed: " << std::strerror(errno)
+                synchronizedLog(std::cerr) << "[camera] " << name << " mmap failed: " << std::strerror(errno)
                           << '\n';
                 for (const Mapping &mapped : mappings) {
                     if (mapped.base && mapped.base != MAP_FAILED) {
@@ -217,7 +218,7 @@ bool CameraCapture::createRequests() {
     const auto &lores_buffers = allocator_->buffers(lores_stream_);
     const std::size_t count = std::min(main_buffers.size(), lores_buffers.size());
     if (count < 4) {
-        std::cerr << "[camera] fewer than four paired buffers were allocated\n";
+        synchronizedLog(std::cerr) << "[camera] fewer than four paired buffers were allocated\n";
         return false;
     }
 
@@ -226,7 +227,7 @@ bool CameraCapture::createRequests() {
         auto request = camera_->createRequest(i);
         if (!request || request->addBuffer(main_stream_, main_buffers[i].get()) != 0 ||
             request->addBuffer(lores_stream_, lores_buffers[i].get()) != 0) {
-            std::cerr << "[camera] failed to build paired request " << i << '\n';
+            synchronizedLog(std::cerr) << "[camera] failed to build paired request " << i << '\n';
             return false;
         }
         requests_.push_back(std::move(request));
@@ -253,7 +254,7 @@ bool CameraCapture::start() {
 
     if (camera_->start(&controls) != 0) {
         camera_->requestCompleted.disconnect(this, &CameraCapture::onRequestCompleted);
-        std::cerr << "[camera] start failed\n";
+        synchronizedLog(std::cerr) << "[camera] start failed\n";
         return false;
     }
 
@@ -261,12 +262,12 @@ bool CameraCapture::start() {
     recycler_thread_ = std::thread(&CameraCapture::recyclerLoop, this);
     for (auto &request : requests_) {
         if (camera_->queueRequest(request.get()) != 0) {
-            std::cerr << "[camera] initial queueRequest failed\n";
+            synchronizedLog(std::cerr) << "[camera] initial queueRequest failed\n";
             stop();
             return false;
         }
     }
-    std::cout << "[camera] capture started at " << config_values_.fps << " fps\n";
+    synchronizedLog(std::cout) << "[camera] capture started at " << config_values_.fps << " fps\n";
     return true;
 }
 
@@ -289,7 +290,7 @@ void CameraCapture::stop() {
         std::lock_guard<std::mutex> lock(recycler_->mutex);
         recycler_->requests.clear();
     }
-    std::cout << "[camera] capture stopped\n";
+    synchronizedLog(std::cout) << "[camera] capture stopped\n";
 }
 
 StreamView CameraCapture::makeView(libcamera::FrameBuffer *buffer,
@@ -394,7 +395,7 @@ void CameraCapture::onRequestCompleted(libcamera::Request *request) {
         }
     } catch (const std::exception &error) {
         metrics_.capture_errors.fetch_add(1);
-        std::cerr << "[camera] frame consumer failed: " << error.what() << '\n';
+        synchronizedLog(std::cerr) << "[camera] frame consumer failed: " << error.what() << '\n';
     }
 }
 
@@ -424,7 +425,7 @@ void CameraCapture::recyclerLoop() {
         request->reuse(libcamera::Request::ReuseBuffers);
         if (camera_->queueRequest(request) != 0) {
             metrics_.capture_errors.fetch_add(1);
-            std::cerr << "[camera] queueRequest failed while recycling\n";
+            synchronizedLog(std::cerr) << "[camera] queueRequest failed while recycling\n";
         }
     }
 }
