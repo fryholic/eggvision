@@ -83,6 +83,9 @@ if(EGGVISION_BUILD_TESTS)
     add_executable(eggvision_model_smoke tests/model_smoke.cpp)
     target_link_libraries(eggvision_model_smoke PRIVATE openvino::runtime Threads::Threads)
 
+    add_executable(eggvision_openvino_backend_parity tests/openvino_backend_parity.cpp)
+    target_link_libraries(eggvision_openvino_backend_parity PRIVATE eggvision_core)
+
     add_executable(eggvision_normalization_benchmark tests/normalization_benchmark.cpp)
     target_link_libraries(eggvision_normalization_benchmark PRIVATE eggvision_core)
 
