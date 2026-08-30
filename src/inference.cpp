@@ -99,6 +99,20 @@ std::string sha256File(const std::string &path) {
 
 }  // namespace
 
+std::string inferenceModelFingerprint(const std::string &backend,
+                                      const std::string &model_path) {
+    const std::string model_hash = sha256File(model_path);
+    if (backend == "mnn") {
+        return model_hash;
+    }
+    if (backend == "openvino") {
+        std::filesystem::path weights_path(model_path);
+        weights_path.replace_extension(".bin");
+        return "xml:" + model_hash + ",bin:" + sha256File(weights_path.string());
+    }
+    throw std::invalid_argument("unsupported inference backend: " + backend);
+}
+
 LetterboxTransform calculateLetterbox(int source_width,
                                       int source_height,
                                       int target_width,
@@ -194,7 +208,8 @@ bool InferenceWorker::initialize() {
             std::cerr << "[inference] model not found: " << config_.model_path << '\n';
             return false;
         }
-        model_sha256_ = sha256File(config_.model_path);
+        model_sha256_ =
+            inferenceModelFingerprint(config_.inference_backend, config_.model_path);
         backend_ = createInferenceBackend(config_.inference_backend);
         InferenceBackendConfig backend_config;
         backend_config.model_path = config_.model_path;

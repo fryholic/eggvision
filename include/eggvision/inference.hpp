@@ -42,6 +42,8 @@ float intersectionOverUnion(const cv::Rect2f &a, const cv::Rect2f &b);
 std::vector<Detection> nonMaximumSuppression(std::vector<Detection> detections,
                                              float iou_threshold);
 void bgrToNormalizedRgbChw(const cv::Mat &bgr, float *destination);
+std::string inferenceModelFingerprint(const std::string &backend,
+                                      const std::string &model_path);
 
 class InferenceWorker {
 public:

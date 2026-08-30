@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -305,6 +307,36 @@ void testDmaBufReadSync() {
 }  // namespace
 
 int main() {
+    namespace fs = std::filesystem;
+    const fs::path fingerprint_dir =
+        fs::temp_directory_path() / "eggvision-model-fingerprint-test";
+    std::error_code fingerprint_error;
+    fs::remove_all(fingerprint_dir, fingerprint_error);
+    fs::create_directory(fingerprint_dir);
+    const fs::path mnn_model = fingerprint_dir / "model.mnn";
+    const fs::path openvino_xml = fingerprint_dir / "model.xml";
+    const fs::path openvino_bin = fingerprint_dir / "model.bin";
+    {
+        std::ofstream(mnn_model, std::ios::binary) << "mnn-model";
+        std::ofstream(openvino_xml, std::ios::binary) << "openvino-graph";
+        std::ofstream(openvino_bin, std::ios::binary) << "weights-a";
+    }
+    const std::string mnn_fingerprint =
+        eggvision::inferenceModelFingerprint("mnn", mnn_model.string());
+    const std::string openvino_fingerprint_a =
+        eggvision::inferenceModelFingerprint("openvino", openvino_xml.string());
+    std::ofstream(openvino_bin, std::ios::binary | std::ios::trunc) << "weights-b";
+    const std::string openvino_fingerprint_b =
+        eggvision::inferenceModelFingerprint("openvino", openvino_xml.string());
+    expect(mnn_fingerprint.size() == 64,
+           "MNN fingerprint is the single model SHA-256");
+    expect(openvino_fingerprint_a.find("xml:") == 0 &&
+               openvino_fingerprint_a.find(",bin:") != std::string::npos,
+           "OpenVINO fingerprint identifies graph and weights");
+    expect(openvino_fingerprint_a != openvino_fingerprint_b,
+           "OpenVINO fingerprint changes when only BIN weights change");
+    fs::remove_all(fingerprint_dir, fingerprint_error);
+
     testDmaBufReadSync();
     testCompactI420Inspection();
 

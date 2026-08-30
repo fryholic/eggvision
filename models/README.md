@@ -18,7 +18,9 @@ The selected MNN FP32 model has SHA-256
 `4f8276abc13ac915d2ecc59a9a16c857af84be697a1fe0c812fcfce33599cbc8`.
 It was converted with MNN 3.6.1 from the reproduced YOLOv5n v7 ONNX opset 17
 model. Startup rejects a model whose shape, dtype, or NCHW layout differs from
-the contract, and logs the selected model file's SHA-256.
+the contract. The MNN fingerprint is the model file SHA-256; the OpenVINO
+fingerprint records both the XML and sibling BIN SHA-256 so a weights-only
+change is observable.
 
 OpenVINO remains an explicit rollback backend. Its verified XML and BIN hashes
 are respectively `181ac01d646f660899b7866eefcfddc87307f5f0e87be741b4797636458d634e`
