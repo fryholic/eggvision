@@ -335,6 +335,8 @@ int main(int argc, char **argv) {
                 continue;
             }
             const double seconds = std::chrono::duration<double>(now - last_report).count();
+            const auto uptime_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count();
             const std::uint64_t captured = metrics.captured.load();
             const std::uint64_t pushed = metrics.rtsp_pushed.load();
             const std::uint64_t inferred = metrics.inference_processed.load();
@@ -347,8 +349,8 @@ int main(int argc, char **argv) {
                                                 : metrics.inference_input_total_us.load() / 1000.0 /
                                                       inferred;
             eggvision::synchronizedLog(std::cout) << std::fixed << std::setprecision(2)
-                      << "{\"type\":\"metrics\",\"capture_fps\":"
-                      << (captured - last_capture) / seconds
+                      << "{\"type\":\"metrics\",\"uptime_ms\":" << uptime_ms
+                      << ",\"capture_fps\":" << (captured - last_capture) / seconds
                       << ",\"rtsp_fps\":" << (pushed - last_rtsp) / seconds
                       << ",\"inference_fps\":" << (inferred - last_inference) / seconds
                       << ",\"inference_avg_ms\":" << average_inference_ms

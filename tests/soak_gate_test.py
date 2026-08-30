@@ -17,15 +17,17 @@ def run_case(
 ):
     with tempfile.TemporaryDirectory(prefix="eggvision-soak-gate-") as directory:
         root = Path(directory)
-        metrics = [
-            {
-                "type": "metrics",
-                "capture_fps": 30.0,
-                "rtsp_fps": 30.0,
-                "inference_fps": 10.0,
-            }
-            for _ in range(max(30, math.ceil(duration / 5) + 12))
-        ]
+        metrics = []
+        for uptime_seconds in range(5, duration, 5):
+            metrics.append(
+                {
+                    "type": "metrics",
+                    "uptime_ms": uptime_seconds * 1000,
+                    "capture_fps": 30.0,
+                    "rtsp_fps": 30.0,
+                    "inference_fps": 10.0,
+                }
+            )
         started = datetime(2026, 8, 30, tzinfo=timezone(timedelta(hours=9)))
         resources = []
         for index in range(max(4, math.ceil(duration / 30))):
@@ -62,8 +64,16 @@ def run_case(
 
 def main():
     verifier = sys.argv[1]
-    if run_case(verifier).returncode != 0:
+    valid = run_case(verifier)
+    if valid.returncode != 0:
         raise RuntimeError("valid soak fixture was rejected")
+    valid_result = json.loads(valid.stdout)
+    if (
+        valid_result["metrics_coverage_seconds"] != 55.0
+        or valid_result["metrics_max_gap_seconds"] != 5.0
+        or valid_result["resource_coverage_seconds"] != 90.0
+    ):
+        raise RuntimeError(f"valid soak fixture summary is incorrect: {valid_result}")
 
     def slow_inference(metrics, _resources, _extra):
         metrics[-1]["inference_fps"] = 1.0
@@ -76,6 +86,25 @@ def main():
 
     def malformed_json(_metrics, _resources, extra):
         extra.append('{"type":"metrics","capture_fps":}')
+
+    def prefixed_malformed_json(_metrics, _resources, extra):
+        extra.append('prefix-corruption:{"type":"metrics","capture_fps":}')
+
+    def missing_uptime(metrics, _resources, _extra):
+        del metrics[-1]["uptime_ms"]
+
+    def metrics_gap(metrics, _resources, _extra):
+        metrics[:] = [
+            row
+            for row in metrics
+            if not 600000 <= row["uptime_ms"] <= 945000
+        ]
+
+    def metrics_ended_early(metrics, _resources, _extra):
+        metrics[:] = [row for row in metrics if row["uptime_ms"] <= 1450000]
+
+    def non_finite_metric(metrics, _resources, _extra):
+        metrics[-1]["inference_fps"] = float("nan")
 
     def truncated_resources(_metrics, resources, _extra):
         del resources[2:]
@@ -111,23 +140,65 @@ def main():
         resources[-1] = resources[-1].replace("fd_count=60", "fd_count=2000")
 
     failing = [
-        run_case(verifier, slow_inference),
-        run_case(verifier, stopped_rtsp),
-        run_case(verifier, current_throttle),
-        run_case(verifier, malformed_json),
-        run_case(verifier, truncated_resources, duration=1800),
-        run_case(verifier, missing_rss),
-        run_case(verifier, missing_fd),
-        run_case(verifier, missing_temperature),
-        run_case(verifier, compressed_coverage),
-        run_case(verifier, runaway_rss),
-        run_case(verifier, runaway_fd),
-        run_case(verifier, rss_ceiling),
-        run_case(verifier, fd_ceiling),
-        run_case(verifier, after="throttled=0xf0000"),
+        ("slow inference", run_case(verifier, slow_inference), "inference_fps fell below"),
+        ("stopped RTSP", run_case(verifier, stopped_rtsp), "rtsp_fps fell below"),
+        ("current throttle", run_case(verifier, current_throttle), "current throttling"),
+        ("malformed JSON", run_case(verifier, malformed_json), "malformed JSON records"),
+        (
+            "prefixed malformed JSON",
+            run_case(verifier, prefixed_malformed_json),
+            "structured marker found outside a JSON record",
+        ),
+        ("missing uptime", run_case(verifier, missing_uptime), "invalid uptime_ms"),
+        (
+            "metrics gap",
+            run_case(verifier, metrics_gap, duration=1800),
+            "invalid metrics uptime gap",
+        ),
+        (
+            "metrics ended early",
+            run_case(verifier, metrics_ended_early, duration=1800),
+            "metrics ended early",
+        ),
+        (
+            "non-finite metric",
+            run_case(verifier, non_finite_metric),
+            "non-finite inference_fps",
+        ),
+        (
+            "truncated resources",
+            run_case(verifier, truncated_resources, duration=1800),
+            "insufficient resource samples",
+        ),
+        ("missing RSS", run_case(verifier, missing_rss), "malformed resource sample"),
+        ("missing FD", run_case(verifier, missing_fd), "malformed resource sample"),
+        (
+            "missing temperature",
+            run_case(verifier, missing_temperature),
+            "malformed resource sample",
+        ),
+        (
+            "compressed resource coverage",
+            run_case(verifier, compressed_coverage),
+            "insufficient resource time coverage",
+        ),
+        ("RSS growth", run_case(verifier, runaway_rss), "RSS growth exceeded"),
+        ("FD growth", run_case(verifier, runaway_fd), "FD growth exceeded"),
+        ("RSS ceiling", run_case(verifier, rss_ceiling), "RSS ceiling exceeded"),
+        ("FD ceiling", run_case(verifier, fd_ceiling), "FD ceiling exceeded"),
+        (
+            "new throttle history",
+            run_case(verifier, after="throttled=0xf0000"),
+            "new throttling history bits appeared",
+        ),
     ]
-    if any(result.returncode == 0 for result in failing):
-        raise RuntimeError("invalid soak fixture passed")
+    for name, result, expected_error in failing:
+        if result.returncode == 0:
+            raise RuntimeError(f"invalid soak fixture passed: {name}")
+        if expected_error not in result.stderr:
+            raise RuntimeError(
+                f"invalid soak fixture failed for the wrong reason: {name}: {result.stderr}"
+            )
     print("soak gate tests passed")
     return 0
 

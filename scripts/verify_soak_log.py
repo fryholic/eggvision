@@ -17,6 +17,11 @@ RESOURCE_RSS_GROWTH_FLOOR_KB = 16 * 1024
 RESOURCE_RSS_GROWTH_RATIO = 0.20
 RESOURCE_FD_GROWTH_FLOOR = 16
 RESOURCE_FD_GROWTH_RATIO = 0.25
+METRICS_INTERVAL_SECONDS = 5
+METRICS_WARMUP_SECONDS = 60
+METRICS_MIN_SAMPLE_RATIO = 0.8
+METRICS_MAX_GAP_SECONDS = 7.5
+STRUCTURED_LOG_MARKERS = ('"type":',)
 RESOURCE_LINE = re.compile(
     r"(?P<timestamp>\S+) rss_kb=(?P<rss_kb>\d+) fd_count=(?P<fd_count>\d+) "
     r"temp=(?P<temperature>-?(?:\d+(?:\.\d*)?|\.\d+))'C "
@@ -151,13 +156,18 @@ def verify_resource_stability(resource_log, duration):
     }
 
 
-def verify(app_log, resource_log, duration, before_text, after_text):
-    if duration <= 0:
-        raise ValueError(f"duration must be positive: {duration}")
+def parse_metrics(app_log):
     metrics = []
     malformed = []
     for line_number, line in enumerate(Path(app_log).read_text(errors="replace").splitlines(), 1):
         if not line.startswith("{"):
+            if any(marker in line for marker in STRUCTURED_LOG_MARKERS):
+                malformed.append(
+                    {
+                        "line": line_number,
+                        "error": "structured marker found outside a JSON record",
+                    }
+                )
             continue
         try:
             row = json.loads(line)
@@ -168,25 +178,118 @@ def verify(app_log, resource_log, duration, before_text, after_text):
             metrics.append(row)
     if malformed:
         raise RuntimeError(f"malformed JSON records: {malformed[:3]}")
+    return metrics
 
-    warmup_samples = 12
-    measured = metrics[warmup_samples:]
-    minimum_samples = max(1, int(max(0, duration - 60) / 5 * 0.8))
+
+def metric_number(row, field, index):
+    value = row.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"invalid {field} at metric index {index}: {value!r}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise RuntimeError(f"non-finite {field} at metric index {index}: {value!r}")
+    return number
+
+
+def verify_metrics(app_log, duration):
+    metrics = parse_metrics(app_log)
+    if not metrics:
+        raise RuntimeError("no metrics records")
+
+    uptime_seconds = []
+    threshold_fields = ("capture_fps", "rtsp_fps", "inference_fps")
+    for index, row in enumerate(metrics):
+        uptime_ms = metric_number(row, "uptime_ms", index)
+        if uptime_ms < 0:
+            raise RuntimeError(f"negative uptime_ms at metric index {index}: {uptime_ms}")
+        uptime_seconds.append(uptime_ms / 1000.0)
+        for field in threshold_fields:
+            metric_number(row, field, index)
+
+    gaps = [
+        current - previous
+        for previous, current in zip(uptime_seconds, uptime_seconds[1:])
+    ]
+    invalid_gaps = [gap for gap in gaps if gap <= 0 or gap > METRICS_MAX_GAP_SECONDS]
+    if invalid_gaps:
+        raise RuntimeError(f"invalid metrics uptime gap: {invalid_gaps[:10]}")
+
+    measured = [
+        (index, row, uptime)
+        for index, (row, uptime) in enumerate(zip(metrics, uptime_seconds))
+        if uptime >= METRICS_WARMUP_SECONDS
+    ]
+    minimum_samples = max(
+        1,
+        math.floor(
+            max(0, duration - METRICS_WARMUP_SECONDS)
+            / METRICS_INTERVAL_SECONDS
+            * METRICS_MIN_SAMPLE_RATIO
+        ),
+    )
     if len(measured) < minimum_samples:
         raise RuntimeError(
             f"insufficient measured metrics: {len(measured)} < {minimum_samples}"
         )
+
+    first_measured_uptime = measured[0][2]
+    last_measured_uptime = measured[-1][2]
+    if first_measured_uptime > METRICS_WARMUP_SECONDS + METRICS_MAX_GAP_SECONDS:
+        raise RuntimeError(
+            f"metrics started late after warm-up: {first_measured_uptime:.3f}s"
+        )
+    minimum_last_uptime = max(0, duration - METRICS_MAX_GAP_SECONDS)
+    if last_measured_uptime < minimum_last_uptime:
+        raise RuntimeError(
+            "metrics ended early: "
+            f"{last_measured_uptime:.3f}s < {minimum_last_uptime:.3f}s"
+        )
+    metrics_coverage = last_measured_uptime - first_measured_uptime
+    minimum_coverage = max(
+        0,
+        duration - METRICS_WARMUP_SECONDS - 2 * METRICS_MAX_GAP_SECONDS,
+    )
+    if metrics_coverage < minimum_coverage:
+        raise RuntimeError(
+            f"insufficient metrics time coverage: {metrics_coverage:.3f}s "
+            f"< {minimum_coverage:.3f}s"
+        )
+
     thresholds = {"capture_fps": 25.0, "rtsp_fps": 25.0, "inference_fps": 8.0}
     for field, threshold in thresholds.items():
         failures = [
-            index + warmup_samples
-            for index, row in enumerate(measured)
-            if float(row.get(field, -1.0)) < threshold
+            index
+            for index, row, _uptime in measured
+            if metric_number(row, field, index) < threshold
         ]
         if failures:
             raise RuntimeError(
                 f"{field} fell below {threshold} at metric indexes {failures[:10]}"
             )
+
+    return {
+        "metrics": len(metrics),
+        "measured_metrics": len(measured),
+        "metrics_first_measured_uptime_seconds": first_measured_uptime,
+        "metrics_last_measured_uptime_seconds": last_measured_uptime,
+        "metrics_coverage_seconds": metrics_coverage,
+        "metrics_max_gap_seconds": max(gaps, default=0.0),
+        "minimum_capture_fps": min(
+            metric_number(row, "capture_fps", index) for index, row, _ in measured
+        ),
+        "minimum_rtsp_fps": min(
+            metric_number(row, "rtsp_fps", index) for index, row, _ in measured
+        ),
+        "minimum_inference_fps": min(
+            metric_number(row, "inference_fps", index) for index, row, _ in measured
+        ),
+    }
+
+
+def verify(app_log, resource_log, duration, before_text, after_text):
+    if duration <= 0:
+        raise ValueError(f"duration must be positive: {duration}")
+    metrics_result = verify_metrics(app_log, duration)
 
     before = parse_throttled(before_text)
     after = parse_throttled(after_text)
@@ -201,14 +304,10 @@ def verify(app_log, resource_log, duration, before_text, after_text):
     resource_result = verify_resource_stability(resource_log, duration)
 
     result = {
-        "metrics": len(metrics),
-        "measured_metrics": len(measured),
-        "minimum_capture_fps": min(float(row["capture_fps"]) for row in measured),
-        "minimum_rtsp_fps": min(float(row["rtsp_fps"]) for row in measured),
-        "minimum_inference_fps": min(float(row["inference_fps"]) for row in measured),
         "before_throttled": before_text,
         "after_throttled": after_text,
     }
+    result.update(metrics_result)
     result.update(resource_result)
     return result
 
